@@ -73,6 +73,13 @@ Notebook and kernel commands include `:notebook run all`, `:notebook save`,
 Use `:help` in the application for the complete list. Short aliases such as
 `:run`, `:output clear`, `:w`, `:q`, and `:wq` are also supported.
 
+Open a workspace terminal beneath the active document with `:terminal` or
+`:terminal open`; hide it with `:terminal close`. The terminal keeps its current
+directory and command history while hidden. Use Up/Down for history, Ctrl+L to
+clear its output, Ctrl+C to interrupt a running command, and Escape to return
+focus to the editor. It is a lightweight command shell for builds, tests, and
+project commands; full-screen interactive terminal programs are not supported.
+
 Other commands:
 
 ```bash

@@ -6,6 +6,7 @@ import pytest
 from nbcli.kernel import ExecutionUpdate
 from nbcli.model import Cell, CellType, ExecutionState, Notebook, StreamOutput
 from nbcli.storage import new_notebook, save_notebook
+from nbcli.terminal import TerminalInput, TerminalPane
 from nbcli.tui import NotebookApp
 
 
@@ -577,3 +578,29 @@ async def test_command_intellisense_from_open_and_prefix():
 
         await pilot.press("tab")
         assert command.value == "cell output clear"
+
+
+@pytest.mark.asyncio
+async def test_terminal_commands_open_run_and_close_split(tmp_path):
+    notebook_path = tmp_path / "notes.ipynb"
+    save_notebook(new_notebook(notebook_path))
+    app = NotebookApp(new_notebook(notebook_path), workspace_root=tmp_path)
+
+    async with app.run_test(size=(110, 34)) as pilot:
+        pane = app.query_one("#terminal-pane", TerminalPane)
+        assert not pane.display
+
+        await submit_command(app, pilot, "terminal open")
+        terminal_input = pane.query_one("#terminal-input", TerminalInput)
+        assert pane.display
+        assert terminal_input.has_focus
+
+        terminal_input.value = "printf terminal-ok"
+        await pilot.press("enter")
+        await pane.workers.wait_for_complete()
+        assert "terminal-ok" in pane.transcript
+
+        await pilot.press("escape")
+        await submit_command(app, pilot, "terminal close")
+        assert not pane.display
+        assert app._view(app.selected).has_focus

@@ -16,3 +16,5 @@ def test_completion_catalog_contains_full_commands_and_aliases():
     assert "kernel restart" in COMMAND_SUGGESTIONS
     assert "wq" in COMMAND_SUGGESTIONS
     assert "run cell 1" in COMMAND_SUGGESTIONS
+    assert "terminal open" in COMMAND_SUGGESTIONS
+    assert "terminal close" in COMMAND_SUGGESTIONS

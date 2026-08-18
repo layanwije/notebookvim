@@ -11,7 +11,7 @@ from rich.text import Text
 from textual import events, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.suggester import Suggester, SuggestFromList
 from textual.widgets import Footer, Header, Input, Static, TextArea, Tree
 
@@ -21,6 +21,7 @@ from .kernel import ExecutionUpdate, Kernel
 from .model import Cell, CellType, Notebook
 from .rendering import render_cell
 from .storage import load_notebook, new_notebook, save_notebook
+from .terminal import TerminalInput, TerminalPane
 from .workspace import (
     TextBuffer,
     is_supported_text_file,
@@ -242,7 +243,15 @@ class NotebookApp(App[None]):
         border-right: solid $surface-lighten-2;
         background: $surface-darken-1;
     }
-    #notebook { padding: 1 2; }
+    #document-column { width: 1fr; height: 100%; }
+    #notebook { height: 1fr; padding: 1 2; }
+    #terminal-pane {
+        height: 40%; min-height: 8;
+        border-top: solid $accent;
+        background: $surface-darken-1;
+    }
+    #terminal-output { height: 1fr; padding: 0 1; }
+    #terminal-input { height: 3; border: tall $accent; padding: 0 1; }
     CellView {
         width: 100%; height: auto; min-height: 5;
         margin: 0 0 1 0; padding: 1 2;
@@ -326,6 +335,7 @@ class NotebookApp(App[None]):
         self._running_cells: set[int] = set()
         self._collapsed_outputs: set[str] = set()
         self._quit_armed = False
+        self.terminal_pane = TerminalPane(self.workspace_root, id="terminal-pane")
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -337,9 +347,11 @@ class NotebookApp(App[None]):
         )
         with Horizontal(id="workspace"):
             yield self._project_tree()
-            with VerticalScroll(id="notebook"):
-                for index in range(len(self.notebook.cells)):
-                    yield self._new_view(index)
+            with Vertical(id="document-column"):
+                with VerticalScroll(id="notebook"):
+                    for index in range(len(self.notebook.cells)):
+                        yield self._new_view(index)
+                yield self.terminal_pane
         yield Static(id="status")
         yield CommandInput(placeholder="Command", id="command")
         yield Footer()
@@ -349,6 +361,7 @@ class NotebookApp(App[None]):
         self._select(0)
         self.query_one("#command", CommandInput).display = False
         self.query_one("#file-picker", ProjectFileInput).display = False
+        self.query_one("#terminal-pane", TerminalPane).display = False
         self._refresh_tabs()
         self._update_status("IDLE")
         if self.initial_path is not None and self.initial_path != self.notebook.path.resolve():
@@ -482,6 +495,23 @@ class NotebookApp(App[None]):
             self.text_editor.focus()
         else:
             self._view(self.selected).focus(scroll_visible=True)
+
+    def action_terminal_open(self) -> None:
+        pane = self.query_one("#terminal-pane", TerminalPane)
+        pane.display = True
+        pane.query_one("#terminal-input", TerminalInput).focus()
+        self.query_one("#status", Static).update(
+            " TERMINAL │ Escape: editor │ Up/Down: history │ Ctrl+L: clear │ Ctrl+C: interrupt"
+        )
+
+    def action_terminal_close(self) -> None:
+        self.query_one("#terminal-pane", TerminalPane).display = False
+        self._focus_document()
+        self._update_status()
+
+    def focus_document_from_terminal(self) -> None:
+        self._focus_document()
+        self._update_status()
 
     def leave_text_editor(self) -> None:
         if self.text_editor is None or self.text_buffer is None:
@@ -1022,6 +1052,10 @@ class NotebookApp(App[None]):
             self.action_previous_tab()
         elif command == "files focus":
             self.action_toggle_file_focus()
+        elif command in {"terminal", "terminal open"}:
+            self.action_terminal_open()
+        elif command == "terminal close":
+            self.action_terminal_close()
         elif command == "help":
             self.notify("\n".join(f":{item}" for item in COMMANDS), title="Commands", timeout=15)
         elif command == "quit":
@@ -1151,6 +1185,7 @@ class NotebookApp(App[None]):
         self.exit()
 
     async def on_unmount(self) -> None:
+        await self.terminal_pane.shutdown()
         await self._shutdown_all_kernels()
 
     async def _shutdown_all_kernels(self) -> None:
