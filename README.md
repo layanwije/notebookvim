@@ -3,10 +3,12 @@
 `notebookcli` is a Vim-inspired terminal workspace for Jupyter notebooks and
 data engineering projects. Navigate and edit notebooks or source files, run
 cells in a persistent kernel, explore data with local SQL and profiling tools,
-and manage an entire project without leaving the command line. It includes an
-integrated terminal, AI assistance powered by Codex, Claude, or Ollama, and
-connectivity for data platforms such as Databricks, with a provider-neutral
-foundation designed to support platforms such as Microsoft Fabric.
+and manage an entire project without leaving the command line. Python and SQL
+are supported today, with Scala and R support planned for future releases. The
+workspace also includes an integrated terminal, AI assistance powered by Codex,
+Claude, or Ollama, and connectivity for data platforms such as Databricks, with
+a provider-neutral foundation designed to support platforms such as Microsoft
+Fabric.
 
 ## Install
 
