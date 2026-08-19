@@ -14,6 +14,8 @@ Python and SQL are supported today, with Scala and R planned for future releases
 
 Whether you are exploring data, prototyping an idea, or building a production pipeline, notebookvim helps you work quickly, stay in flow, and keep your hands on the keyboard.
 
+![NotebookVim screenshot](images/Screenshot-1.png)
+
 ## Install
 
 Install the published package with pip:
