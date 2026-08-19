@@ -3,11 +3,14 @@ from pathlib import Path
 
 import pytest
 
+from nbcli.workspace import ParquetPreview
 from nbcli.kernel import ExecutionUpdate
+from nbcli.databricks import DatabricksConnection
 from nbcli.model import Cell, CellType, ExecutionState, Notebook, StreamOutput
-from nbcli.storage import new_notebook, save_notebook
+from nbcli.remote import RemoteMapping, SyncStatus
+from nbcli.storage import load_notebook, new_notebook, save_notebook
 from nbcli.terminal import TerminalInput, TerminalPane
-from nbcli.tui import NotebookApp
+from nbcli.tui import InspectionModal, NotebookApp, TabBar
 
 
 @pytest.mark.asyncio
@@ -105,6 +108,49 @@ async def test_run_cell_number_command_executes_one_based_cell():
 
         assert executed == ["second = 2"]
         assert app.selected == 1
+
+
+@pytest.mark.asyncio
+async def test_sql_workspace_runs_query_and_profiles_result(tmp_path):
+    notebook = Notebook(
+        path=tmp_path / "example.ipynb",
+        cells=[Cell(CellType.CODE, "", cell_id="cell0001")],
+    )
+    app = NotebookApp(notebook, workspace_root=tmp_path)
+
+    async with app.run_test(size=(120, 36)) as pilot:
+        await pilot.press("colon")
+        app.query_one("#command").value = "sql"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert app.sql_editor is not None
+        assert app.sql_editor.language == "sql"
+        app.sql_editor.text = "select 42 as answer, 'ready' as status"
+        await pilot.press("escape", "colon")
+        app.query_one("#command").value = "sql run"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert app.sql_document is not None
+        assert app.sql_document.result is not None
+        assert app.sql_document.result.rows == [[42, "ready"]]
+
+        app._save_sql_query()
+        query_path = tmp_path / "queries" / "query-1.sql"
+        tree = app.query_one("#files")
+        queries_node = next(node for node in tree.root.children if node.label.plain == "queries")
+        assert query_path.resolve() in [node.data for node in queries_node.children]
+        assert query_path.resolve() in app.project_paths
+
+        await pilot.press("escape", "colon")
+        app.query_one("#command").value = "profile"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert app.dataset_profile is not None
+        assert app.dataset_profile.row_count == 1
+        assert app.dataset_profile.column_count == 2
 
 
 @pytest.mark.asyncio
@@ -285,6 +331,90 @@ async def test_workspace_does_not_discard_dirty_notebook(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_workspace_opens_parquet_as_a_read_only_preview(tmp_path, monkeypatch):
+    notebook_path = tmp_path / "notes.ipynb"
+    parquet_path = tmp_path / "events.parquet"
+    save_notebook(new_notebook(notebook_path))
+    parquet_path.write_bytes(b"placeholder")
+    preview = ParquetPreview(
+        path=parquet_path.resolve(),
+        columns=["event", "count"],
+        rows=[["opened", 1]],
+        total_rows=1,
+    )
+    monkeypatch.setattr("nbcli.tui.load_parquet_preview", lambda path: preview)
+    app = NotebookApp(new_notebook(notebook_path), workspace_root=tmp_path)
+
+    async with app.run_test(size=(100, 30)):
+        await app._open_project_file(parquet_path)
+
+        assert app.parquet_preview == preview
+        assert app.query_one("#parquet-preview").preview.rows == [["opened", 1]]
+        assert "PARQUET" in str(app.query_one("#status").render())
+
+
+@pytest.mark.asyncio
+async def test_parquet_inspect_is_contextual_and_opens_report(tmp_path):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    notebook_path = tmp_path / "notes.ipynb"
+    parquet_path = tmp_path / "events.parquet"
+    save_notebook(new_notebook(notebook_path))
+    pq.write_table(pa.table({"event": ["open", "save"], "count": [1, 2]}), parquet_path)
+    app = NotebookApp(new_notebook(notebook_path), workspace_root=tmp_path)
+
+    async with app.run_test(size=(110, 34)) as pilot:
+        await app._open_project_file(parquet_path)
+        assert app._contextual_command_suggestions()[0] == "inspect parquet describe"
+
+        await pilot.press("colon")
+        command = app.query_one("#command")
+        command.value = "inspect"
+        await pilot.pause()
+        assert command._suggestion == "inspect parquet"
+
+        await pilot.press("tab")
+        assert command.value == "inspect parquet"
+        command.value = "inspect parquet d"
+        await pilot.pause()
+        assert command._suggestion == "inspect parquet describe"
+
+        command.value = "inspect parquet describe"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert isinstance(app.screen, InspectionModal)
+        assert app.screen.report.title == "Parquet describe · events.parquet"
+        assert ["rows", "2"] in app.screen.report.rows
+        assert len(app.tabs) == 1
+        assert app._active_path == parquet_path.resolve()
+
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not isinstance(app.screen, InspectionModal)
+        assert app.parquet_preview is not None
+
+        await submit_command(app, pilot, "inspect parquet schema side")
+        pane = app.query_one("#inspection-pane")
+        assert pane.display
+        assert pane.report.title == "Parquet schema · events.parquet"
+        assert app.query_one("#document-column").has_class("inspection-side")
+
+        await pilot.press("escape")
+        assert not pane.display
+        assert app.parquet_preview is not None
+
+        await submit_command(app, pilot, "inspect parquet rowgroups below")
+        assert pane.display
+        assert pane.report.title == "Parquet row groups · events.parquet"
+        assert app.query_one("#document-column").has_class("inspection-below")
+
+        await app._dispatch_command("inspect close")
+        assert not pane.display
+
+
+@pytest.mark.asyncio
 async def test_workspace_opens_edits_and_saves_python_file(tmp_path):
     notebook_path = tmp_path / "notes.ipynb"
     python_path = tmp_path / "helpers.py"
@@ -432,6 +562,77 @@ async def test_file_browser_opens_tabs_and_shortcuts_switch_focus_and_tabs(tmp_p
 
         await pilot.press("shift+tab")
         await app.workers.wait_for_complete()
+        assert app._active_path == notebook_path.resolve()
+
+
+@pytest.mark.asyncio
+async def test_workspace_supports_many_open_file_tabs(tmp_path):
+    notebook_path = tmp_path / "notes.ipynb"
+    save_notebook(new_notebook(notebook_path))
+    text_paths = [tmp_path / f"file-{index}.py" for index in range(6)]
+    for index, path in enumerate(text_paths):
+        path.write_text(f"value = {index}\n", encoding="utf-8")
+    app = NotebookApp(new_notebook(notebook_path), workspace_root=tmp_path)
+
+    async with app.run_test(size=(55, 26)):
+        for path in text_paths:
+            await app._open_project_file(path, new_tab=True)
+
+        tab_bar = app.query_one("#tabs", TabBar)
+        assert len(app.tabs) == 7
+        assert tab_bar.tab_count == 7
+        assert tab_bar.active == "document-tab-6"
+        assert app._active_path == text_paths[-1].resolve()
+
+
+@pytest.mark.asyncio
+async def test_tab_close_activates_neighbor_and_reindexes_tabs(tmp_path):
+    notebook_path = tmp_path / "notes.ipynb"
+    first = tmp_path / "first.py"
+    second = tmp_path / "second.py"
+    save_notebook(new_notebook(notebook_path))
+    first.write_text("first = 1\n", encoding="utf-8")
+    second.write_text("second = 2\n", encoding="utf-8")
+    app = NotebookApp(new_notebook(notebook_path), workspace_root=tmp_path)
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await app._open_project_file(first, new_tab=True)
+        await app._open_project_file(second, new_tab=True)
+        assert app._active_path == second.resolve()
+
+        await pilot.press("ctrl+w")
+        await app.workers.wait_for_complete()
+
+        assert len(app.tabs) == 2
+        assert app._active_path == first.resolve()
+        tab_bar = app.query_one("#tabs", TabBar)
+        assert tab_bar.tab_count == 2
+        assert tab_bar.active == "document-tab-1"
+
+        await pilot.press("escape")
+        await submit_command(app, pilot, "tab close")
+        assert len(app.tabs) == 1
+        assert app._active_path == notebook_path.resolve()
+
+
+@pytest.mark.asyncio
+async def test_tab_close_requires_confirmation_for_unsaved_changes(tmp_path):
+    notebook_path = tmp_path / "notes.ipynb"
+    text_path = tmp_path / "draft.py"
+    save_notebook(new_notebook(notebook_path))
+    text_path.write_text("value = 1\n", encoding="utf-8")
+    app = NotebookApp(new_notebook(notebook_path), workspace_root=tmp_path)
+
+    async with app.run_test(size=(100, 30)):
+        await app._open_project_file(text_path, new_tab=True)
+        assert app.text_buffer is not None
+        app.text_buffer.dirty = True
+
+        await app._close_active_tab()
+        assert len(app.tabs) == 2
+
+        await app._close_active_tab()
+        assert len(app.tabs) == 1
         assert app._active_path == notebook_path.resolve()
 
 
@@ -594,6 +795,8 @@ async def test_terminal_commands_open_run_and_close_split(tmp_path):
         terminal_input = pane.query_one("#terminal-input", TerminalInput)
         assert pane.display
         assert terminal_input.has_focus
+        assert app.terminal_placement == "side"
+        assert app.query_one("#document-column").has_class("terminal-side")
 
         terminal_input.value = "printf terminal-ok"
         await pilot.press("enter")
@@ -604,3 +807,78 @@ async def test_terminal_commands_open_run_and_close_split(tmp_path):
         await submit_command(app, pilot, "terminal close")
         assert not pane.display
         assert app._view(app.selected).has_focus
+
+
+@pytest.mark.asyncio
+async def test_terminal_can_open_below_and_return_to_default_side(tmp_path):
+    notebook_path = tmp_path / "notes.ipynb"
+    save_notebook(new_notebook(notebook_path))
+    app = NotebookApp(new_notebook(notebook_path), workspace_root=tmp_path)
+
+    async with app.run_test(size=(110, 34)) as pilot:
+        document = app.query_one("#document-column")
+        await submit_command(app, pilot, "terminal open below")
+        assert app.terminal_placement == "below"
+        assert document.has_class("terminal-below")
+
+        await pilot.press("escape")
+        await submit_command(app, pilot, "terminal")
+        assert app.terminal_placement == "side"
+        assert document.has_class("terminal-side")
+        assert not document.has_class("terminal-below")
+
+
+@pytest.mark.asyncio
+async def test_databricks_connect_configures_notebook_kernel(tmp_path, monkeypatch):
+    notebook_path = tmp_path / "notes.ipynb"
+    save_notebook(new_notebook(notebook_path))
+    app = NotebookApp(new_notebook(notebook_path), workspace_root=tmp_path)
+    connection = DatabricksConnection(
+        profile="MyProfile",
+        host="https://example.cloud.databricks.com",
+        user_name="user@example.com",
+    )
+    monkeypatch.setattr("nbcli.tui.connect_databricks", lambda profile: connection)
+
+    async with app.run_test(size=(110, 34)) as pilot:
+        await submit_command(app, pilot, "databricks connect MyProfile")
+
+        assert app.databricks_connection == connection
+        assert app.kernel.initialization_code is not None
+        assert "WorkspaceClient(profile='MyProfile')" in app.kernel.initialization_code
+        assert "dbutils = workspace.dbutils" in app.kernel.initialization_code
+
+
+@pytest.mark.asyncio
+async def test_remote_sync_commands_create_status_report(tmp_path):
+    notebook_path = tmp_path / "notes.ipynb"
+    save_notebook(new_notebook(notebook_path))
+    app = NotebookApp(load_notebook(notebook_path), workspace_root=tmp_path)
+    app.databricks_connection = DatabricksConnection(
+        profile="Test", host="https://example.cloud.databricks.com", user_name="user"
+    )
+    calls = []
+
+    class FakeRemote:
+        def configure(self, path, remote_path, strip_outputs=False):
+            calls.append(("configure", path, remote_path, strip_outputs))
+            return RemoteMapping("databricks", remote_path)
+
+        def push(self, path, local_content=None, force=False):
+            calls.append(("push", path))
+            return SyncStatus(path, "/Workspace/notes", False, False, 123, True)
+
+        def status(self, path, local_content=None):
+            calls.append(("status", path))
+            return SyncStatus(path, "/Workspace/notes", False, False, 123, True)
+
+    app.remote = FakeRemote()
+
+    async with app.run_test(size=(110, 34)) as pilot:
+        await submit_command(app, pilot, "databricks sync set /Workspace/notes")
+        await submit_command(app, pilot, "databricks sync push")
+        await submit_command(app, pilot, "databricks sync status")
+
+        assert [call[0] for call in calls] == ["configure", "push", "status"]
+        assert app.remote_report is not None
+        assert app.remote_report.title == "Remote status · synchronized"

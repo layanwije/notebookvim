@@ -1,4 +1,4 @@
-# Architecture decision record 001: Python-first v0.1
+q# Architecture decision record 001: Python-first v0.1
 
 **Status:** Accepted (2026-08-18)
 

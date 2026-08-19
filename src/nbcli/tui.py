@@ -2,29 +2,46 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
+import shlex
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from rich.text import Text
+from rich.console import Group
+from rich.table import Table
 from textual import events, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Horizontal, ScrollableContainer, Vertical, VerticalScroll
+from textual.screen import ModalScreen
 from textual.suggester import Suggester, SuggestFromList
-from textual.widgets import Footer, Header, Input, Static, TextArea, Tree
+from textual.widgets import Footer, Header, Input, Static, Tab, Tabs, TextArea, Tree
 
 from .commands import COMMANDS, COMMAND_SUGGESTIONS, normalize_command
 from .completion import python_completions
+from .databricks import (
+    DatabricksConnection,
+    connect_databricks,
+    databricks_client,
+    databricks_kernel_code,
+)
+from .data_workspace import DatasetProfile, DuckDBWorkspace, QueryResult, SqlDocument
 from .kernel import ExecutionUpdate, Kernel
+from .lakehouse import InspectionError, InspectionReport, LakehouseInspector, find_delta_root
+from .git import GitError, GitProfile, GitService
 from .model import Cell, CellType, Notebook
 from .rendering import render_cell
-from .storage import load_notebook, new_notebook, save_notebook
-from .terminal import TerminalInput, TerminalPane
+from .remote import DatabricksRemote, RemoteError, RemoteReport, SyncStatus
+from .storage import load_notebook, new_notebook, save_notebook, to_node
+from .terminal import TerminalInput, TerminalPane, VSCODE_DARK_TERMINAL_THEME
 from .workspace import (
     TextBuffer,
+    ParquetPreview,
+    is_parquet_file,
     is_supported_text_file,
+    load_parquet_preview,
     load_text_buffer,
     notebook_files,
     project_files,
@@ -45,11 +62,181 @@ class CellView(Static, can_focus=True):
         )
 
 
+class ParquetPreviewView(Static, can_focus=True):
+    def __init__(self, preview: ParquetPreview) -> None:
+        super().__init__(id="parquet-preview")
+        self.preview = preview
+
+    def render(self) -> Group:
+        table = Table(title=f"Top {len(self.preview.rows)} rows of {self.preview.total_rows}")
+        for column in self.preview.columns:
+            table.add_column(column, overflow="ellipsis", max_width=30)
+        for row in self.preview.rows:
+            table.add_row(*("null" if value is None else str(value) for value in row))
+        statistics = Table(title="Summary statistics")
+        statistics.add_column("summary", style="bold")
+        for column in self.preview.statistics_columns:
+            statistics.add_column(column, overflow="ellipsis", max_width=30)
+        for row in self.preview.statistics_rows:
+            statistics.add_row(
+                str(row[0]),
+                *(
+                    "null"
+                    if value is None
+                    else f"{value:.6g}"
+                    if isinstance(value, float)
+                    else str(value)
+                    for value in row[1:]
+                ),
+            )
+        return Group(table, "", statistics)
+
+
+def _display_value(value: object) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, float):
+        return f"{value:.6g}"
+    return str(value)
+
+
+class QueryResultView(Static, can_focus=True):
+    def __init__(self, result: QueryResult | None) -> None:
+        super().__init__(id="sql-result")
+        self.result = result
+
+    def render(self):
+        if self.result is None:
+            return "Run the current query with :sql run"
+        result = self.result
+        table = Table()
+        for column in result.columns:
+            table.add_column(column, overflow="ellipsis", max_width=30)
+        for row in result.rows:
+            table.add_row(*(_display_value(value) for value in row))
+        suffix = "+" if result.truncated else ""
+        summary = (
+            f"{len(result.rows)}{suffix} row(s) · {result.elapsed_seconds:.3f}s"
+            if result.columns
+            else f"Completed · {result.elapsed_seconds:.3f}s"
+        )
+        return Group(table, "", summary)
+
+
+class DatasetProfileView(Static, can_focus=True):
+    def __init__(self, profile: DatasetProfile) -> None:
+        super().__init__(id="dataset-profile")
+        self.profile = profile
+
+    def render(self) -> Group:
+        profile = self.profile
+        overview = Table(title="Dataset profile", show_header=False)
+        overview.add_column("Metric", style="bold")
+        overview.add_column("Value")
+        overview.add_row("Source", profile.source)
+        overview.add_row("Shape", f"{profile.row_count:,} rows × {profile.column_count} columns")
+        overview.add_row("Profile time", f"{profile.elapsed_seconds:.3f}s")
+        for key, value in profile.metadata.items():
+            overview.add_row(key.replace("_", " ").title(), _display_value(value))
+
+        columns = Table(title="Column statistics")
+        for heading in (
+            "column", "type", "role", "nulls", "distinct≈", "min", "q25", "median",
+            "q75", "max", "mean", "top values",
+        ):
+            columns.add_column(heading, overflow="ellipsis", max_width=24)
+        for item in profile.columns:
+            top = ", ".join(f"{_display_value(value)} ({count})" for value, count in item.top_values)
+            columns.add_row(
+                item.name,
+                item.data_type,
+                item.role or "—",
+                f"{item.null_count:,} ({item.null_percentage:.1f}%)",
+                _display_value(item.approximate_distinct),
+                _display_value(item.minimum),
+                _display_value(item.q25),
+                _display_value(item.median),
+                _display_value(item.q75),
+                _display_value(item.maximum),
+                _display_value(item.mean),
+                top or "—",
+            )
+        return Group(overview, "", columns)
+
+
+class RemoteReportView(Static, can_focus=True):
+    def __init__(self, report: RemoteReport) -> None:
+        super().__init__(id="remote-report")
+        self.report = report
+
+    def render(self) -> Group:
+        table = Table(title=self.report.title)
+        for column in self.report.columns:
+            table.add_column(column, overflow="ellipsis", max_width=32)
+        for row in self.report.rows:
+            table.add_row(*row)
+        return Group(table, *(f"\n{detail}" for detail in self.report.details))
+
+
+class InspectionReportView(Static, can_focus=True):
+    def __init__(self, report: InspectionReport, widget_id: str = "inspection-report") -> None:
+        super().__init__(id=widget_id)
+        self.report = report
+
+    def render(self) -> Group:
+        table = Table(title=self.report.title)
+        for column in self.report.columns:
+            table.add_column(column, overflow="ellipsis", max_width=36)
+        for row in self.report.rows:
+            table.add_row(*row)
+        return Group(table, *(f"\n{detail}" for detail in self.report.details))
+
+
+class InspectionPane(InspectionReportView):
+    BINDINGS = [Binding("escape", "close", "Close inspection", priority=True)]
+
+    def __init__(self) -> None:
+        super().__init__(InspectionReport("Inspection", [], []), widget_id="inspection-pane")
+
+    def action_close(self) -> None:
+        self.app.action_inspection_close()  # type: ignore[attr-defined]
+
+
+class InspectionModal(ModalScreen[None]):
+    CSS = """
+    InspectionModal { align: center middle; background: rgba(0, 0, 0, 0.65); }
+    #inspection-modal {
+        width: 92%; height: 88%; padding: 1 2;
+        background: $surface; border: round $accent;
+    }
+    #inspection-modal-report { width: auto; height: auto; }
+    """
+    BINDINGS = [Binding("escape", "close", "Close", priority=True)]
+
+    def __init__(self, report: InspectionReport) -> None:
+        super().__init__()
+        self.report = report
+
+    def compose(self) -> ComposeResult:
+        yield ScrollableContainer(
+            InspectionReportView(self.report, widget_id="inspection-modal-report"),
+            id="inspection-modal",
+        )
+
+    def action_close(self) -> None:
+        self.dismiss()
+
+
 @dataclass
 class DocumentTab:
     path: Path
     notebook: Optional[Notebook] = None
     text_buffer: Optional[TextBuffer] = None
+    parquet_preview: Optional[ParquetPreview] = None
+    sql_document: Optional[SqlDocument] = None
+    dataset_profile: Optional[DatasetProfile] = None
+    remote_report: Optional[RemoteReport] = None
+    inspection_report: Optional[InspectionReport] = None
     kernel: Optional[Kernel] = None
     selected: int = 0
     collapsed_outputs: set[str] = field(default_factory=set)
@@ -59,6 +246,18 @@ class DocumentTab:
         if self.text_buffer is not None:
             return self.text_buffer.dirty
         return bool(self.notebook and self.notebook.dirty)
+
+    @property
+    def display_name(self) -> str:
+        if self.sql_document is not None:
+            return self.sql_document.name
+        if self.dataset_profile is not None:
+            return f"Profile · {Path(self.dataset_profile.source).name}"
+        if self.remote_report is not None:
+            return self.remote_report.title
+        if self.inspection_report is not None:
+            return self.inspection_report.title
+        return self.path.name
 
 
 class CellEditor(TextArea):
@@ -96,6 +295,16 @@ class TextFileEditor(TextArea):
         accepted = self.app.accept_completion()  # type: ignore[attr-defined]
         if not accepted:
             self.insert("    ")
+
+
+class SqlEditor(TextArea):
+    BINDINGS = [
+        *TextArea.BINDINGS,
+        Binding("escape", "leave_edit", "Commands", priority=True),
+    ]
+
+    def action_leave_edit(self) -> None:
+        self.app.leave_sql_editor()  # type: ignore[attr-defined]
 
 
 class CommandInput(Input):
@@ -151,6 +360,35 @@ class FuzzyFileSuggester(Suggester):
         matches = ((candidate, score(candidate)) for candidate in self.paths)
         ranked = [(candidate, rank) for candidate, rank in matches if rank is not None]
         return min(ranked, key=lambda item: item[1])[0] if ranked else None
+
+
+class ContextualCommandSuggester(Suggester):
+    """Complete the inspection kind before suggesting a specific operation."""
+
+    def __init__(
+        self, suggestions: tuple[str, ...], inspection_prefix: Optional[str] = None
+    ) -> None:
+        super().__init__(case_sensitive=False)
+        self.suggestions = suggestions
+        self.inspection_prefix = inspection_prefix
+
+    async def get_suggestion(self, value: str) -> Optional[str]:
+        folded = value.casefold()
+        if self.inspection_prefix is not None:
+            prefix = self.inspection_prefix.casefold()
+            if folded.strip() == "inspect" and not value.endswith(" "):
+                return self.inspection_prefix
+            if folded == prefix:
+                return None
+        return next(
+            (
+                suggestion
+                for suggestion in self.suggestions
+                if suggestion.casefold().startswith(folded)
+                and suggestion.casefold() != folded
+            ),
+            None,
+        )
 
 
 class ProjectFileInput(Input):
@@ -225,8 +463,16 @@ class ProjectTree(Tree[Path]):
             self.action_select_cursor()
 
 
-class TabBar(Static, can_focus=True):
-    pass
+class TabBar(Tabs):
+    async def _on_tab_clicked(self, event: Tab.Clicked) -> None:
+        await super()._on_tab_clicked(event)
+        if event.tab.id is None:
+            return
+        try:
+            index = int(event.tab.id.removeprefix("document-tab-"))
+        except ValueError:
+            return
+        await self.app._activate_tab(index)  # type: ignore[attr-defined]
 
 
 class NotebookApp(App[None]):
@@ -235,7 +481,7 @@ class NotebookApp(App[None]):
     Screen { background: $surface; }
     #workspace { height: 1fr; }
     #tabs {
-        height: 1; padding: 0 1;
+        height: 2;
         background: $surface-lighten-1; color: $text-muted;
     }
     #files {
@@ -243,15 +489,34 @@ class NotebookApp(App[None]):
         border-right: solid $surface-lighten-2;
         background: $surface-darken-1;
     }
-    #document-column { width: 1fr; height: 100%; }
-    #notebook { height: 1fr; padding: 1 2; }
+    #document-column { width: 1fr; height: 100%; layout: horizontal; }
+    #notebook { width: 1fr; height: 100%; padding: 1 2; }
     #terminal-pane {
-        height: 40%; min-height: 8;
-        border-top: solid $accent;
-        background: $surface-darken-1;
+        width: 45%; min-width: 30; height: 100%; min-height: 8;
+        border-left: solid $surface-lighten-2;
+        background: #181818; color: #cccccc;
     }
-    #terminal-output { height: 1fr; padding: 0 1; }
-    #terminal-input { height: 3; border: tall $accent; padding: 0 1; }
+    #document-column.terminal-below { layout: vertical; }
+    #document-column.terminal-below #notebook { width: 100%; height: 1fr; }
+    #document-column.terminal-below #terminal-pane {
+        width: 100%; min-width: 0; height: 40%;
+        border-left: none; border-top: solid $surface-lighten-2;
+    }
+    #terminal-output { height: 1fr; padding: 0 1; background: #181818; color: #cccccc; }
+    #terminal-input {
+        height: 3; border: tall $surface-lighten-2; padding: 0 1;
+        background: #181818; color: #cccccc;
+    }
+    #inspection-pane {
+        width: 45%; min-width: 32; height: 100%; padding: 1;
+        border-left: solid $surface-lighten-2; background: $surface-darken-1;
+    }
+    #document-column.inspection-below { layout: vertical; }
+    #document-column.inspection-below #notebook { width: 100%; height: 1fr; }
+    #document-column.inspection-below #inspection-pane {
+        width: 100%; min-width: 0; height: 42%;
+        border-left: none; border-top: solid $surface-lighten-2;
+    }
     CellView {
         width: 100%; height: auto; min-height: 5;
         margin: 0 0 1 0; padding: 1 2;
@@ -269,6 +534,14 @@ class NotebookApp(App[None]):
     TextArea.text-file-editor {
         width: 100%; height: 100%; border: none;
     }
+    TextArea.sql-editor {
+        width: 100%; height: 45%; min-height: 8;
+        margin-bottom: 1; border: round $accent;
+    }
+    QueryResultView { width: 100%; height: auto; min-height: 8; padding: 1; }
+    DatasetProfileView { width: 100%; height: auto; padding: 1; }
+    RemoteReportView { width: 100%; height: auto; padding: 1; }
+    InspectionReportView { width: 100%; height: auto; padding: 1; }
     #completion-menu {
         width: 48; height: auto; max-height: 8;
         margin: -1 0 1 4; padding: 0 1;
@@ -299,6 +572,7 @@ class NotebookApp(App[None]):
         Binding("ctrl+tab", "toggle_file_focus", "Files/editor", priority=True),
         Binding("shift+tab", "next_tab", "Next tab", priority=True),
         Binding("ctrl+shift+tab", "previous_tab", "Previous tab", priority=True),
+        Binding("ctrl+w", "close_tab", "Close tab", priority=True),
         Binding("left_square_bracket", "previous_tab", "Previous tab"),
         Binding("right_square_bracket", "next_tab", "Next tab"),
         Binding("ctrl+q", "request_quit", "Quit", priority=True),
@@ -312,6 +586,7 @@ class NotebookApp(App[None]):
         initial_path: Optional[Path] = None,
     ) -> None:
         super().__init__()
+        self.ansi_theme_dark = VSCODE_DARK_TERMINAL_THEME
         self.notebook = notebook
         self.workspace_root = Path(workspace_root or notebook.path.parent).resolve()
         self.initial_path = Path(initial_path).resolve() if initial_path is not None else None
@@ -320,6 +595,12 @@ class NotebookApp(App[None]):
         self.editor: Optional[CellEditor] = None
         self.text_buffer: Optional[TextBuffer] = None
         self.text_editor: Optional[TextArea] = None
+        self.parquet_preview: Optional[ParquetPreview] = None
+        self.sql_document: Optional[SqlDocument] = None
+        self.sql_editor: Optional[TextArea] = None
+        self.dataset_profile: Optional[DatasetProfile] = None
+        self.remote_report: Optional[RemoteReport] = None
+        self.inspection_report: Optional[InspectionReport] = None
         self.completion_menu: Optional[Static] = None
         self._completion_revision = 0
         self._completions: list[str] = []
@@ -332,14 +613,24 @@ class NotebookApp(App[None]):
             )
         ]
         self.active_tab_index = 0
+        self._tab_activation_lock = asyncio.Lock()
         self._running_cells: set[int] = set()
         self._collapsed_outputs: set[str] = set()
         self._quit_armed = False
+        self._close_armed_tab: Optional[DocumentTab] = None
         self.terminal_pane = TerminalPane(self.workspace_root, id="terminal-pane")
+        self.inspection_pane = InspectionPane()
+        self.terminal_placement = "side"
+        self.databricks_connection: Optional[DatabricksConnection] = None
+        self.git = GitService(self.workspace_root)
+        self.data_workspace: Optional[DuckDBWorkspace] = None
+        self.remote: Optional[DatabricksRemote] = None
+        self.last_remote_run_id: Optional[int] = None
+        self._sql_document_count = 0
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield TabBar(id="tabs")
+        yield TabBar(Tab(self.notebook.path.name, id="document-tab-0"), id="tabs")
         yield ProjectFileInput(
             [str(path.relative_to(self.workspace_root)) for path in self.project_paths],
             placeholder="Find project file",
@@ -352,6 +643,7 @@ class NotebookApp(App[None]):
                     for index in range(len(self.notebook.cells)):
                         yield self._new_view(index)
                 yield self.terminal_pane
+                yield self.inspection_pane
         yield Static(id="status")
         yield CommandInput(placeholder="Command", id="command")
         yield Footer()
@@ -362,6 +654,8 @@ class NotebookApp(App[None]):
         self.query_one("#command", CommandInput).display = False
         self.query_one("#file-picker", ProjectFileInput).display = False
         self.query_one("#terminal-pane", TerminalPane).display = False
+        self.query_one("#inspection-pane", InspectionPane).display = False
+        self.query_one("#document-column", Vertical).add_class("terminal-side")
         self._refresh_tabs()
         self._update_status("IDLE")
         if self.initial_path is not None and self.initial_path != self.notebook.path.resolve():
@@ -369,6 +663,10 @@ class NotebookApp(App[None]):
 
     def _project_tree(self) -> ProjectTree:
         tree = ProjectTree(self.workspace_root.name, self.workspace_root, id="files")
+        self._populate_project_tree(tree)
+        return tree
+
+    def _populate_project_tree(self, tree: ProjectTree) -> None:
         nodes = {Path(): tree.root}
         for file_path in self.project_paths:
             relative = file_path.relative_to(self.workspace_root)
@@ -380,10 +678,23 @@ class NotebookApp(App[None]):
                     nodes[current] = parent.add(part, self.workspace_root / current)
             nodes[current].add_leaf(relative.name, file_path)
         tree.root.expand()
-        return tree
+
+    def _refresh_project_files(self) -> None:
+        """Rescan files created while nbcli is running and rebuild navigation."""
+        self.project_paths = project_files(self.workspace_root)
+        tree = self.query_one("#files", ProjectTree)
+        tree.root.remove_children()
+        self._populate_project_tree(tree)
+        tree.refresh(layout=True)
+        suggestions = [
+            str(path.relative_to(self.workspace_root)) for path in self.project_paths
+        ]
+        picker = self.query_one("#file-picker", ProjectFileInput)
+        picker.suggester = FuzzyFileSuggester(suggestions)
+        picker._suggestion = None
 
     def _update_sub_title(self) -> None:
-        path = self.text_buffer.path if self.text_buffer is not None else self.notebook.path
+        path = self._active_path
         try:
             self.sub_title = str(path.resolve().relative_to(self.workspace_root))
         except ValueError:
@@ -394,17 +705,20 @@ class NotebookApp(App[None]):
         return self.tabs[self.active_tab_index]
 
     def _refresh_tabs(self) -> None:
-        line = Text()
+        tab_bar = self.query_one("#tabs", TabBar)
+        rendered_tabs = list(tab_bar.query(Tab))
         for index, tab in enumerate(self.tabs):
-            if index:
-                line.append(" │ ", style="dim")
             marker = "●" if tab.dirty else ""
-            label = f" {tab.path.name}{marker} "
-            line.append(label, style="reverse bold" if index == self.active_tab_index else "")
-        self.query_one("#tabs", Static).update(line)
+            if index < len(rendered_tabs):
+                rendered_tabs[index].label = f" {tab.display_name}{marker} "
+        active_id = f"document-tab-{self.active_tab_index}"
+        if tab_bar.active != active_id:
+            tab_bar.active = active_id
 
     def _sync_active_tab(self) -> None:
         tab = self._active_tab
+        if tab.sql_document is not None and self.sql_editor is not None:
+            tab.sql_document.query = self.sql_editor.text
         if tab.notebook is not None and self.text_buffer is None:
             tab.selected = self.selected
             tab.collapsed_outputs = set(self._collapsed_outputs)
@@ -425,6 +739,40 @@ class NotebookApp(App[None]):
     def action_previous_tab(self) -> None:
         self._queue_tab_switch(-1)
 
+    def action_close_tab(self) -> None:
+        self.run_worker(self._close_active_tab())
+
+    async def _close_active_tab(self) -> None:
+        async with self._tab_activation_lock:
+            if len(self.tabs) == 1:
+                self.notify("The last tab cannot be closed", severity="warning")
+                return
+            if self._running_cells:
+                self.notify("Wait for execution to finish before closing this tab", severity="warning")
+                return
+            if self.editor is not None:
+                await self._finish_edit()
+            self._sync_active_tab()
+            closing = self._active_tab
+            if closing.dirty and self._close_armed_tab is not closing:
+                self._close_armed_tab = closing
+                self.notify(
+                    "Unsaved changes — save first, or close the tab again to discard them",
+                    severity="warning",
+                )
+                return
+            closing_index = self.active_tab_index
+            if closing.kernel is not None:
+                await closing.kernel.shutdown()
+            self.tabs.pop(closing_index)
+            self._close_armed_tab = None
+            self.active_tab_index = min(closing_index, len(self.tabs) - 1)
+            tab_bar = self.query_one("#tabs", TabBar)
+            await tab_bar.clear()
+            for index, tab in enumerate(self.tabs):
+                await tab_bar.add_tab(Tab(tab.display_name, id=f"document-tab-{index}"))
+            await self._activate_tab_unlocked(self.active_tab_index, force=True)
+
     def action_open_selected_in_tab(self) -> None:
         tree = self.query_one("#files", ProjectTree)
         node = tree.cursor_node
@@ -440,6 +788,10 @@ class NotebookApp(App[None]):
         self.run_worker(self._activate_tab(target))
 
     async def _activate_tab(self, index: int, force: bool = False) -> None:
+        async with self._tab_activation_lock:
+            await self._activate_tab_unlocked(index, force)
+
+    async def _activate_tab_unlocked(self, index: int, force: bool = False) -> None:
         if index == self.active_tab_index and not force:
             self._focus_document()
             return
@@ -455,17 +807,69 @@ class NotebookApp(App[None]):
         tab = self._active_tab
         notebook_view = self.query_one("#notebook", VerticalScroll)
         await notebook_view.remove_children()
+        self.sql_document = None
+        self.sql_editor = None
+        self.dataset_profile = None
+        self.remote_report = None
+        self.inspection_report = None
         if tab.text_buffer is not None:
             self.text_buffer = tab.text_buffer
+            self.parquet_preview = None
             self.text_editor = await self._mount_text_editor(notebook_view, tab.text_buffer)
             self.text_editor.focus()
+        elif tab.parquet_preview is not None:
+            self.text_buffer = None
+            self.text_editor = None
+            self.parquet_preview = tab.parquet_preview
+            preview = ParquetPreviewView(tab.parquet_preview)
+            await notebook_view.mount(preview)
+            preview.focus()
+        elif tab.sql_document is not None:
+            self.text_buffer = None
+            self.text_editor = None
+            self.parquet_preview = None
+            self.sql_document = tab.sql_document
+            editor = SqlEditor.code_editor(
+                tab.sql_document.query, language="sql", id="sql-editor"
+            )
+            editor.add_class("sql-editor")
+            editor.border_title = "DuckDB SQL"
+            self.sql_editor = editor
+            await notebook_view.mount(editor, QueryResultView(tab.sql_document.result))
+            editor.focus()
+        elif tab.dataset_profile is not None:
+            self.text_buffer = None
+            self.text_editor = None
+            self.parquet_preview = None
+            self.dataset_profile = tab.dataset_profile
+            view = DatasetProfileView(tab.dataset_profile)
+            await notebook_view.mount(view)
+            view.focus()
+        elif tab.remote_report is not None:
+            self.text_buffer = None
+            self.text_editor = None
+            self.parquet_preview = None
+            self.remote_report = tab.remote_report
+            view = RemoteReportView(tab.remote_report)
+            await notebook_view.mount(view)
+            view.focus()
+        elif tab.inspection_report is not None:
+            self.text_buffer = None
+            self.text_editor = None
+            self.parquet_preview = None
+            self.inspection_report = tab.inspection_report
+            view = InspectionReportView(tab.inspection_report)
+            await notebook_view.mount(view)
+            view.focus()
         else:
             assert tab.notebook is not None
             self.text_buffer = None
             self.text_editor = None
+            self.parquet_preview = None
             self.notebook = tab.notebook
             if tab.kernel is None:
                 tab.kernel = Kernel(self.notebook.kernel_name)
+                self._configure_databricks_kernel(tab.kernel)
             self.kernel = tab.kernel
             self.selected = tab.selected
             self._collapsed_outputs = set(tab.collapsed_outputs)
@@ -474,40 +878,86 @@ class NotebookApp(App[None]):
             )
             self._select(self.selected)
         self._quit_armed = False
+        self._close_armed_tab = None
         self._update_sub_title()
         self._refresh_tabs()
         self._update_status()
 
     @property
     def _notebook_active(self) -> bool:
-        return self.text_buffer is None
+        return self._active_tab.notebook is not None
 
     @property
     def _document_dirty(self) -> bool:
-        return self.text_buffer.dirty if self.text_buffer is not None else self.notebook.dirty
+        if self.text_buffer is not None:
+            return self.text_buffer.dirty
+        return bool(self._active_tab.notebook and self.notebook.dirty)
 
     @property
     def _active_path(self) -> Path:
-        return self.text_buffer.path if self.text_buffer is not None else self.notebook.path.resolve()
+        if self.text_buffer is not None:
+            return self.text_buffer.path
+        return self._active_tab.path.resolve()
 
     def _focus_document(self) -> None:
         if self.text_editor is not None:
             self.text_editor.focus()
+        elif self.sql_editor is not None:
+            self.sql_editor.focus()
+        elif self.dataset_profile is not None:
+            self.query_one("#dataset-profile", DatasetProfileView).focus(scroll_visible=True)
+        elif self.remote_report is not None:
+            self.query_one("#remote-report", RemoteReportView).focus(scroll_visible=True)
+        elif self.inspection_report is not None:
+            self.query_one("#inspection-report", InspectionReportView).focus(scroll_visible=True)
+        elif self.parquet_preview is not None:
+            self.query_one("#parquet-preview", ParquetPreviewView).focus(scroll_visible=True)
         else:
             self._view(self.selected).focus(scroll_visible=True)
 
-    def action_terminal_open(self) -> None:
+    def action_terminal_open(self, placement: str = "side") -> None:
+        if placement not in {"side", "below"}:
+            placement = "side"
+        self.action_inspection_close(focus_document=False)
+        document = self.query_one("#document-column", Vertical)
+        document.remove_class("terminal-side", "terminal-below")
+        document.add_class(f"terminal-{placement}")
+        self.terminal_placement = placement
         pane = self.query_one("#terminal-pane", TerminalPane)
         pane.display = True
         pane.query_one("#terminal-input", TerminalInput).focus()
         self.query_one("#status", Static).update(
-            " TERMINAL │ Escape: editor │ Up/Down: history │ Ctrl+L: clear │ Ctrl+C: interrupt"
+            f" TERMINAL {placement.upper()} │ Escape: editor │ Up/Down: history │ "
+            "Ctrl+L: clear │ Ctrl+C: interrupt"
         )
 
     def action_terminal_close(self) -> None:
         self.query_one("#terminal-pane", TerminalPane).display = False
         self._focus_document()
         self._update_status()
+
+    def action_inspection_close(self, focus_document: bool = True) -> None:
+        pane = self.query_one("#inspection-pane", InspectionPane)
+        pane.display = False
+        document = self.query_one("#document-column", Vertical)
+        document.remove_class("inspection-side", "inspection-below")
+        if focus_document:
+            self._focus_document()
+            self._update_status()
+
+    def _open_inspection_pane(self, report: InspectionReport, placement: str) -> None:
+        self.action_terminal_close()
+        document = self.query_one("#document-column", Vertical)
+        document.remove_class("terminal-side", "terminal-below", "inspection-side", "inspection-below")
+        document.add_class(f"inspection-{placement}")
+        pane = self.query_one("#inspection-pane", InspectionPane)
+        pane.report = report
+        pane.display = True
+        pane.refresh(layout=True)
+        pane.focus()
+        self.query_one("#status", Static).update(
+            f" INSPECT {placement.upper()} │ Escape: close │ arrows/Page Up/Page Down: scroll"
+        )
 
     def focus_document_from_terminal(self) -> None:
         self._focus_document()
@@ -521,6 +971,13 @@ class NotebookApp(App[None]):
         self.query_one("#status", Static).update(
             f" NORMAL TEXT │ Enter: edit │ : commands │ {self.text_buffer.path.name}{dirty}"
         )
+
+    def leave_sql_editor(self) -> None:
+        if self.sql_editor is None or self.sql_document is None:
+            return
+        self.sql_document.query = self.sql_editor.text
+        self.query_one("#tabs", TabBar).focus()
+        self._update_status()
 
     def _view(self, index: int) -> CellView:
         return self.query_one(f"#cell-{index}", CellView)
@@ -560,6 +1017,32 @@ class NotebookApp(App[None]):
             dirty = " ●" if self.text_buffer.dirty else ""
             self.query_one("#status", Static).update(
                 f" TEXT │ Ctrl+S: save │ Ctrl+P: find │ {self.text_buffer.path.name}{dirty}"
+            )
+            return
+        if self.parquet_preview is not None:
+            self.query_one("#status", Static).update(
+                f" PARQUET │ Top 25 rows + stats │ Ctrl+P: find │ "
+                f"{self.parquet_preview.path.name}"
+            )
+            return
+        if self.sql_document is not None:
+            self.query_one("#status", Static).update(
+                f" SQL │ :sql run · :sql explain · :profile │ {self.sql_document.name}"
+            )
+            return
+        if self.dataset_profile is not None:
+            self.query_one("#status", Static).update(
+                " PROFILE │ :profile save exports JSON │ Ctrl+P: find"
+            )
+            return
+        if self.remote_report is not None:
+            self.query_one("#status", Static).update(
+                " DATABRICKS │ :databricks jobs · logs · cancel · rerun │ Ctrl+W: close"
+            )
+            return
+        if self.inspection_report is not None:
+            self.query_one("#status", Static).update(
+                " INSPECT │ metadata only · source remains unchanged │ Ctrl+W: close"
             )
             return
         dirty = " ●" if self.notebook.dirty else ""
@@ -640,9 +1123,13 @@ class NotebookApp(App[None]):
                     notebook=notebook,
                     kernel=Kernel(notebook.kernel_name),
                 )
+                self._configure_databricks_kernel(tab.kernel)
             elif is_supported_text_file(path):
                 buffer = load_text_buffer(path)
                 tab = DocumentTab(path=path, text_buffer=buffer)
+            elif is_parquet_file(path):
+                preview = await asyncio.to_thread(load_parquet_preview, path)
+                tab = DocumentTab(path=path, parquet_preview=preview)
             else:
                 self.notify(f"Unsupported file type: {path.name}", severity="warning")
                 return
@@ -652,6 +1139,9 @@ class NotebookApp(App[None]):
         if new_tab:
             self.tabs.append(tab)
             target = len(self.tabs) - 1
+            await self.query_one("#tabs", TabBar).add_tab(
+                Tab(path.name, id=f"document-tab-{target}")
+            )
             await self._activate_tab(target)
         else:
             self._sync_active_tab()
@@ -673,6 +1163,448 @@ class NotebookApp(App[None]):
         editor.add_class("text-file-editor")
         await notebook_view.mount(editor)
         return editor
+
+    def _duckdb(self) -> DuckDBWorkspace:
+        if self.data_workspace is None:
+            self.data_workspace = DuckDBWorkspace()
+        return self.data_workspace
+
+    async def _append_tab(self, tab: DocumentTab) -> None:
+        self.tabs.append(tab)
+        target = len(self.tabs) - 1
+        await self.query_one("#tabs", TabBar).add_tab(
+            Tab(tab.display_name, id=f"document-tab-{target}")
+        )
+        await self._activate_tab(target)
+
+    async def _open_sql_workspace(self, always_new: bool = False) -> None:
+        if not always_new:
+            existing = next(
+                (index for index, tab in enumerate(self.tabs) if tab.sql_document is not None),
+                None,
+            )
+            if existing is not None:
+                await self._activate_tab(existing)
+                return
+        try:
+            self._duckdb()
+        except Exception as exc:
+            self.notify(str(exc), title="SQL workspace", severity="error")
+            return
+        self._sql_document_count += 1
+        name = "SQL" if self._sql_document_count == 1 else f"SQL {self._sql_document_count}"
+        document = SqlDocument(name=name)
+        await self._append_tab(
+            DocumentTab(
+                path=self.workspace_root / f".nbcli-sql-{self._sql_document_count}.sql",
+                sql_document=document,
+            )
+        )
+
+    async def _run_sql(self, explain: bool = False) -> None:
+        if self.sql_document is None or self.sql_editor is None:
+            self.notify("Open a SQL workspace with :sql first", severity="warning")
+            return
+        self.sql_document.query = self.sql_editor.text
+        operation = "Explaining" if explain else "Running"
+        self.notify(f"{operation} query…", title="DuckDB")
+        try:
+            engine = self._duckdb()
+            if explain:
+                result = await asyncio.to_thread(engine.explain, self.sql_document.query)
+            else:
+                result = await asyncio.to_thread(engine.execute, self.sql_document.query)
+        except Exception as exc:
+            self.notify(str(exc), title="SQL failed", severity="error", timeout=15)
+            return
+        self.sql_document.result = result
+        result_view = self.query_one("#sql-result", QueryResultView)
+        result_view.result = result
+        result_view.refresh(layout=True)
+        self.notify(
+            f"Returned {len(result.rows)} row(s) in {result.elapsed_seconds:.3f}s",
+            title="DuckDB",
+        )
+
+    def _show_sql_history(self) -> None:
+        try:
+            history = self._duckdb().history
+        except Exception as exc:
+            self.notify(str(exc), title="SQL workspace", severity="error")
+            return
+        if not history:
+            self.notify("No queries have run in this session", title="SQL history")
+            return
+        lines = [f"{index}. {query}" for index, query in enumerate(history[-10:], 1)]
+        self.notify("\n\n".join(lines), title="Recent SQL", timeout=20)
+
+    def _save_sql_query(self) -> None:
+        if self.sql_document is None or self.sql_editor is None:
+            self.notify("Open a SQL workspace with :sql first", severity="warning")
+            return
+        self.sql_document.query = self.sql_editor.text
+        queries = self.workspace_root / "queries"
+        queries.mkdir(exist_ok=True)
+        counter = 1
+        while (queries / f"query-{counter}.sql").exists():
+            counter += 1
+        path = queries / f"query-{counter}.sql"
+        path.write_text(self.sql_document.query.rstrip() + "\n", encoding="utf-8")
+        self._refresh_project_files()
+        self.notify(f"Saved {path.relative_to(self.workspace_root)}", title="SQL workspace")
+
+    async def _profile_current(self) -> None:
+        try:
+            engine = self._duckdb()
+            if self.parquet_preview is not None:
+                profile = await asyncio.to_thread(
+                    engine.profile_parquet, self.parquet_preview.path
+                )
+            elif self.sql_document is not None:
+                if self.sql_editor is not None:
+                    self.sql_document.query = self.sql_editor.text
+                profile = await asyncio.to_thread(
+                    engine.profile_query,
+                    self.sql_document.query,
+                    self.sql_document.name,
+                )
+            else:
+                self.notify(
+                    "Profiling currently supports an active Parquet preview or SQL query",
+                    severity="warning",
+                )
+                return
+        except Exception as exc:
+            self.notify(str(exc), title="Profile failed", severity="error", timeout=15)
+            return
+        await self._append_tab(
+            DocumentTab(
+                path=self.workspace_root / f".nbcli-profile-{len(self.tabs)}.json",
+                dataset_profile=profile,
+            )
+        )
+
+    def _save_profile(self) -> None:
+        if self.dataset_profile is None:
+            self.notify("Open a profile first with :profile", severity="warning")
+            return
+        source_name = Path(self.dataset_profile.source).stem
+        if not source_name or source_name == ".":
+            source_name = "dataset"
+        safe_name = "".join(
+            character if character.isalnum() or character in "-_" else "-"
+            for character in source_name
+        ).strip("-") or "dataset"
+        path = self.workspace_root / f"{safe_name}.profile.json"
+        try:
+            self.dataset_profile.save(path)
+        except Exception as exc:
+            self.notify(str(exc), title="Profile save failed", severity="error")
+            return
+        self._refresh_project_files()
+        self.notify(f"Saved {path.name}", title="Dataset profile")
+
+    def _inspection_source_path(self) -> Path:
+        if self.parquet_preview is not None:
+            return self.parquet_preview.path
+        path = self._active_tab.path
+        if path.suffix.lower() in {".parquet", ".parq", ".pq"}:
+            return path
+        raise InspectionError("Open a Parquet file before using :inspect")
+
+    def _contextual_command_suggestions(self) -> tuple[str, ...]:
+        try:
+            path = self._inspection_source_path()
+        except InspectionError:
+            return COMMAND_SUGGESTIONS
+        parquet = tuple(item for item in COMMANDS if item.startswith("inspect parquet "))
+        delta = (
+            tuple(item for item in COMMANDS if item.startswith("inspect delta "))
+            if find_delta_root(path) is not None
+            else ()
+        )
+        remaining = tuple(item for item in COMMAND_SUGGESTIONS if item not in parquet + delta)
+        return parquet + delta + remaining
+
+    def _inspection_completion_prefix(self) -> Optional[str]:
+        try:
+            self._inspection_source_path()
+        except InspectionError:
+            return None
+        return "inspect parquet"
+
+    async def _show_inspection_report(
+        self, report: InspectionReport, placement: Optional[str] = None
+    ) -> None:
+        if placement in {"side", "below"}:
+            self._open_inspection_pane(report, placement)
+            return
+        self.action_inspection_close(focus_document=False)
+        await self.push_screen(InspectionModal(report))
+
+    async def _dispatch_inspect_command(self, command: str) -> None:
+        try:
+            arguments = shlex.split(command)
+            if arguments == ["inspect", "close"]:
+                self.action_inspection_close()
+                return
+            if len(arguments) < 3 or arguments[0] != "inspect":
+                raise InspectionError("Use :inspect parquet … or :inspect delta …")
+            placement = arguments.pop() if arguments[-1] in {"side", "below"} else None
+            source = self._inspection_source_path()
+            inspector = LakehouseInspector(source)
+            kind = arguments[1]
+            operation = " ".join(arguments[2:])
+            if kind == "parquet" and operation == "profile":
+                await self._profile_current()
+                return
+            if kind == "delta" and operation == "profile":
+                files = await asyncio.to_thread(inspector.delta_files)
+                profile = await asyncio.to_thread(
+                    self._duckdb().profile_files,
+                    files,
+                    f"Delta table {inspector.delta_root}",
+                )
+                await self._append_tab(
+                    DocumentTab(
+                        path=self.workspace_root / f".nbcli-profile-{len(self.tabs)}.json",
+                        dataset_profile=profile,
+                    )
+                )
+                return
+            version = None
+            if kind == "delta" and arguments[2:4] == ["time", "travel"]:
+                if len(arguments) != 5 or not arguments[4].isdigit():
+                    raise InspectionError("Usage: :inspect delta time travel VERSION")
+                operation = "time travel"
+                version = int(arguments[4])
+            if kind == "parquet":
+                report = await asyncio.to_thread(inspector.parquet, operation)
+            elif kind == "delta":
+                report = await asyncio.to_thread(inspector.delta, operation, version)
+            else:
+                raise InspectionError("Inspection type must be parquet or delta")
+            await self._show_inspection_report(report, placement)
+        except Exception as exc:
+            self.notify(str(exc), title="Inspection failed", severity="error", timeout=15)
+
+    def _remote_service(self) -> DatabricksRemote:
+        if self.databricks_connection is None:
+            raise RemoteError("Connect first with :databricks connect [profile]")
+        if self.remote is None:
+            self.remote = DatabricksRemote(
+                self.workspace_root, databricks_client(self.databricks_connection)
+            )
+        return self.remote
+
+    def _remote_local_path(self) -> Path:
+        tab = self._active_tab
+        if tab.notebook is None and tab.text_buffer is None:
+            raise RemoteError("Remote sync requires an active notebook or source file")
+        if tab.path.suffix.lower() not in {".ipynb", ".py", ".sql", ".scala", ".r"}:
+            raise RemoteError("Remote sync supports .ipynb, .py, .sql, .scala, and .r files")
+        return tab.path.resolve()
+
+    def _remote_local_bytes(self) -> bytes:
+        tab = self._active_tab
+        if tab.notebook is not None:
+            import nbformat
+
+            return nbformat.writes(to_node(tab.notebook), version=nbformat.NO_CONVERT).encode()
+        assert tab.text_buffer is not None
+        return tab.text_buffer.text.encode("utf-8")
+
+    async def _show_remote_report(self, report: RemoteReport) -> None:
+        await self._append_tab(
+            DocumentTab(
+                path=self.workspace_root / f".nbcli-remote-{uuid.uuid4().hex}.txt",
+                remote_report=report,
+            )
+        )
+
+    async def _reload_active_remote_file(self, path: Path) -> None:
+        tab = self._active_tab
+        if tab.path.resolve() != path.resolve():
+            return
+        if tab.notebook is not None:
+            if tab.kernel is not None:
+                await tab.kernel.shutdown()
+            notebook = load_notebook(path)
+            tab.notebook = notebook
+            tab.kernel = Kernel(notebook.kernel_name)
+        elif tab.text_buffer is not None:
+            tab.text_buffer = load_text_buffer(path)
+        await self._activate_tab(self.active_tab_index, force=True)
+
+    async def _dispatch_remote_command(self, command: str) -> None:
+        try:
+            arguments = shlex.split(command)
+        except ValueError as exc:
+            self.notify(str(exc), title="Remote command", severity="error")
+            return
+        try:
+            service = self._remote_service()
+            if arguments[:2] == ["remote", "set"]:
+                if len(arguments) < 3:
+                    raise RemoteError(
+                        "Usage: :databricks sync set /Workspace/path [--strip-outputs]"
+                    )
+                path = self._remote_local_path()
+                strip_outputs = "--strip-outputs" in arguments[3:]
+                mapping = await asyncio.to_thread(
+                    service.configure, path, arguments[2], strip_outputs
+                )
+                self.notify(
+                    f"{path.name} ↔ {mapping.remote_path}", title="Remote mapping"
+                )
+            elif arguments and arguments[0] in {"status", "pull", "push"}:
+                path = self._remote_local_path()
+                if len(arguments) > 1:
+                    await asyncio.to_thread(service.configure, path, arguments[1], False)
+                if arguments[0] == "status":
+                    status = await asyncio.to_thread(
+                        service.status, path, self._remote_local_bytes()
+                    )
+                    await self._show_sync_status(status)
+                elif arguments[0] == "pull":
+                    status = await asyncio.to_thread(
+                        service.pull, path, dirty=self._active_tab.dirty
+                    )
+                    await self._reload_active_remote_file(path)
+                    self.notify(f"Pulled {status.remote_path}", title="Remote sync")
+                else:
+                    if self._active_tab.dirty:
+                        raise RemoteError("Save local edits before pushing")
+                    status = await asyncio.to_thread(service.push, path)
+                    self.notify(f"Pushed {status.remote_path}", title="Remote sync")
+            elif arguments == ["diff", "remote"]:
+                path = self._remote_local_path()
+                lines = await asyncio.to_thread(
+                    service.diff, path, self._remote_local_bytes()
+                )
+                mapping = service.mapping(path)
+                await self._show_remote_report(
+                    RemoteReport(
+                        title=f"Remote diff · {path.name}",
+                        columns=["local", "remote"],
+                        rows=[[path.name, mapping.remote_path if mapping else "—"]],
+                        details=lines,
+                    )
+                )
+            elif arguments and arguments[0] == "resolve":
+                if len(arguments) != 2 or arguments[1] not in {"local", "remote"}:
+                    raise RemoteError(
+                        "Use :databricks sync resolve local to force push or "
+                        ":databricks sync resolve remote to force pull"
+                    )
+                path = self._remote_local_path()
+                if self._active_tab.dirty:
+                    raise RemoteError("Save or undo local edits before resolving")
+                if arguments[1] == "local":
+                    await asyncio.to_thread(service.push, path, None, force=True)
+                    self.notify("Conflict resolved using the local version", title="Remote sync")
+                else:
+                    await asyncio.to_thread(service.pull, path, dirty=False, force=True)
+                    await self._reload_active_remote_file(path)
+                    self.notify("Conflict resolved using the remote version", title="Remote sync")
+            elif arguments in (["jobs"], ["jobs", "running"]):
+                if len(arguments) == 1:
+                    jobs = await asyncio.to_thread(service.list_jobs)
+                    report = RemoteReport(
+                        "Databricks jobs", ["job ID", "name"],
+                        [[str(item.job_id), item.name] for item in jobs],
+                    )
+                else:
+                    runs = await asyncio.to_thread(service.list_runs, True)
+                    report = self._runs_report("Running Databricks jobs", runs)
+                await self._show_remote_report(report)
+            elif arguments[:2] == ["run", "remote"]:
+                if len(arguments) < 3 or not arguments[2].isdigit():
+                    raise RemoteError("Usage: :databricks run JOB_ID [--param name=value]")
+                parameters: dict[str, str] = {}
+                index = 3
+                while index < len(arguments):
+                    if arguments[index] != "--param" or index + 1 >= len(arguments):
+                        raise RemoteError("Parameters use --param name=value")
+                    name, separator, value = arguments[index + 1].partition("=")
+                    if not separator or not name:
+                        raise RemoteError("Parameters use --param name=value")
+                    parameters[name] = value
+                    index += 2
+                run_id = await asyncio.to_thread(service.run_job, int(arguments[2]), parameters)
+                self.last_remote_run_id = run_id
+                self.notify(f"Started run {run_id}", title="Databricks job")
+            elif arguments and arguments[0] in {"logs", "cancel", "rerun"}:
+                follow = arguments[:2] == ["logs", "follow"]
+                id_index = 2 if follow else 1
+                run_id = (
+                    int(arguments[id_index])
+                    if len(arguments) > id_index and arguments[id_index].isdigit()
+                    else self.last_remote_run_id
+                )
+                if run_id is None:
+                    raise RemoteError("Provide a RUN_ID or start a run first")
+                if arguments[0] == "logs":
+                    report = await asyncio.to_thread(service.logs, run_id)
+                    await self._show_remote_report(report)
+                    if follow:
+                        self.run_worker(self._follow_remote_logs(run_id), group="remote-logs", exclusive=True)
+                elif arguments[0] == "cancel":
+                    await asyncio.to_thread(service.cancel, run_id)
+                    self.notify(f"Cancellation requested for run {run_id}", title="Databricks job")
+                else:
+                    new_run_id = await asyncio.to_thread(service.rerun, run_id)
+                    self.last_remote_run_id = new_run_id
+                    self.notify(f"Started rerun {new_run_id}", title="Databricks job")
+            else:
+                raise RemoteError("Unknown remote command")
+        except Exception as exc:
+            self.notify(str(exc), title="Remote operation failed", severity="error", timeout=18)
+
+    async def _show_sync_status(self, status: SyncStatus) -> None:
+        modified = str(status.remote_modified_at or "—")
+        await self._show_remote_report(
+            RemoteReport(
+                title=f"Remote status · {status.label}",
+                columns=["local", "remote", "local changed", "remote changed", "modified"],
+                rows=[[
+                    status.local_path.name, status.remote_path,
+                    "yes" if status.local_changed else "no",
+                    "yes" if status.remote_changed else "no",
+                    modified if status.remote_exists else "not uploaded",
+                ]],
+            )
+        )
+
+    def _runs_report(self, title: str, runs) -> RemoteReport:
+        return RemoteReport(
+            title,
+            ["run", "job", "name", "state", "result", "started", "duration", "parameters", "compute", "link"],
+            [[
+                str(run.run_id), str(run.job_id or "—"), run.name, run.state, run.result or "—",
+                run.start_time, run.duration, json.dumps(run.parameters), run.compute or "—", run.url,
+            ] for run in runs],
+        )
+
+    async def _follow_remote_logs(self, run_id: int) -> None:
+        terminal_states = {"TERMINATED", "SKIPPED", "INTERNAL_ERROR", "SUCCESS", "FAILED", "CANCELED"}
+        while True:
+            try:
+                run = await asyncio.to_thread(self._remote_service().get_run, run_id)
+                report = await asyncio.to_thread(self._remote_service().logs, run_id)
+                if self.remote_report is not None and self.remote_report.title.startswith(f"Run {run_id}"):
+                    self.remote_report = report
+                    self._active_tab.remote_report = report
+                    view = self.query_one("#remote-report", RemoteReportView)
+                    view.report = report
+                    view.refresh(layout=True)
+                if run.state in terminal_states or run.result:
+                    self.notify(f"Run {run_id}: {run.result or run.state}", title="Databricks job")
+                    return
+                await asyncio.sleep(2)
+            except Exception as exc:
+                self.notify(str(exc), title="Log follow stopped", severity="error")
+                return
 
     def action_next_cell(self) -> None:
         if self._notebook_active and self.editor is None:
@@ -704,11 +1636,12 @@ class NotebookApp(App[None]):
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
         """Request suggestions without blocking interactive editing."""
         if event.text_area is self.text_editor and self.text_buffer is not None:
-            self.text_buffer.text = event.text_area.text
-            self.text_buffer.dirty = True
-            self._quit_armed = False
-            self._update_status()
-            self._refresh_tabs()
+            if self.text_buffer.text != event.text_area.text:
+                self.text_buffer.text = event.text_area.text
+                self.text_buffer.dirty = True
+                self._quit_armed = False
+                self._update_status()
+                self._refresh_tabs()
             if event.text_area.language == "python":
                 self._completion_revision += 1
                 revision = self._completion_revision
@@ -716,6 +1649,9 @@ class NotebookApp(App[None]):
                 self._request_completions(
                     revision, event.text_area.text, self.text_buffer.path, line, column
                 )
+            return
+        if event.text_area is self.sql_editor and self.sql_document is not None:
+            self.sql_document.query = event.text_area.text
             return
         if event.text_area is not self.editor or self.editor.language != "python":
             return
@@ -948,11 +1884,14 @@ class NotebookApp(App[None]):
         if self.editor is not None or (self.text_editor is not None and self.text_editor.has_focus):
             return
         command = self.query_one("#command", CommandInput)
+        suggestions = self._contextual_command_suggestions()
+        inspection_prefix = self._inspection_completion_prefix()
+        command.suggester = ContextualCommandSuggester(suggestions, inspection_prefix)
         command.value = ""
         command.display = True
         command.focus()
         self.call_after_refresh(
-            lambda: setattr(command, "_suggestion", COMMAND_SUGGESTIONS[0])
+            lambda: setattr(command, "_suggestion", inspection_prefix or suggestions[0])
             if command.display and not command.value
             else None
         )
@@ -1050,12 +1989,64 @@ class NotebookApp(App[None]):
             self.action_next_tab()
         elif command == "tab previous":
             self.action_previous_tab()
+        elif command == "tab close":
+            await self._close_active_tab()
         elif command == "files focus":
             self.action_toggle_file_focus()
-        elif command in {"terminal", "terminal open"}:
-            self.action_terminal_open()
+        elif command in {"terminal", "terminal open", "terminal open side"}:
+            self.action_terminal_open("side")
+        elif command == "terminal open below":
+            self.action_terminal_open("below")
         elif command == "terminal close":
             self.action_terminal_close()
+        elif command == "sql":
+            await self._open_sql_workspace()
+        elif command == "sql new":
+            await self._open_sql_workspace(always_new=True)
+        elif command == "sql run":
+            await self._run_sql()
+        elif command == "sql explain":
+            await self._run_sql(explain=True)
+        elif command == "sql history":
+            self._show_sql_history()
+        elif command == "sql save":
+            self._save_sql_query()
+        elif command == "sql cancel":
+            if self.data_workspace is not None:
+                self.data_workspace.interrupt()
+                self.notify("Cancellation requested", title="DuckDB")
+        elif command in {"profile", "profile current"}:
+            await self._profile_current()
+        elif command == "profile save":
+            self._save_profile()
+        elif command.startswith("inspect "):
+            await self._dispatch_inspect_command(command)
+        elif command == "databricks connect" or command.startswith("databricks connect "):
+            profile = command.removeprefix("databricks connect").strip() or None
+            await self._connect_databricks(profile)
+        elif command == "databricks status":
+            self._show_databricks_status()
+        elif command.startswith("databricks "):
+            operation = command.removeprefix("databricks ")
+            if operation.startswith("sync set"):
+                remote_command = "remote set" + operation.removeprefix("sync set")
+            elif operation == "sync status":
+                remote_command = "status"
+            elif operation == "sync diff":
+                remote_command = "diff remote"
+            elif operation.startswith("sync pull"):
+                remote_command = "pull" + operation.removeprefix("sync pull")
+            elif operation.startswith("sync push"):
+                remote_command = "push" + operation.removeprefix("sync push")
+            elif operation.startswith("sync resolve"):
+                remote_command = "resolve" + operation.removeprefix("sync resolve")
+            elif operation.startswith("run"):
+                remote_command = "run remote" + operation.removeprefix("run")
+            else:
+                remote_command = operation
+            await self._dispatch_remote_command(remote_command)
+        elif command.startswith("git "):
+            await self._dispatch_git_command(command)
         elif command == "help":
             self.notify("\n".join(f":{item}" for item in COMMANDS), title="Commands", timeout=15)
         elif command == "quit":
@@ -1072,6 +2063,118 @@ class NotebookApp(App[None]):
                     self.exit()
         elif command:
             self.notify(f"Unknown command: {command}", severity="warning")
+
+    async def _dispatch_git_command(self, command: str) -> None:
+        try:
+            arguments = shlex.split(command)
+        except ValueError as exc:
+            self.notify(str(exc), title="Git command", severity="error")
+            return
+        try:
+            if arguments[:3] == ["git", "profile", "add"]:
+                if len(arguments) < 8:
+                    raise GitError(
+                        "Usage: :git profile add NAME PROVIDER ACCOUNT EMAIL AUTHOR_NAME"
+                    )
+                profile = GitProfile(
+                    name=arguments[3],
+                    provider=arguments[4].lower(),
+                    account=arguments[5],
+                    email=arguments[6],
+                    author_name=" ".join(arguments[7:]),
+                )
+                await asyncio.to_thread(self.git.add_profile, profile)
+                self.notify(f"Saved Git profile {profile.name}", title="Git")
+            elif arguments[:3] == ["git", "profile", "list"]:
+                profiles = await asyncio.to_thread(self.git.profiles)
+                active = await asyncio.to_thread(self.git.active_profile_name)
+                if not profiles:
+                    self.notify("No Git profiles configured", title="Git profiles")
+                    return
+                lines = [
+                    f"{'●' if item.name == active else ' '} {item.name} · "
+                    f"{item.provider} · {item.account} · {item.email}"
+                    for item in profiles
+                ]
+                self.notify("\n".join(lines), title="Git profiles", timeout=15)
+            elif arguments[:3] == ["git", "profile", "use"] and len(arguments) == 4:
+                profile = await asyncio.to_thread(self.git.use_profile, arguments[3])
+                self.notify(
+                    f"Using {profile.name} · {profile.account}\n"
+                    f"Commits: {profile.author_name} <{profile.email}>",
+                    title="Git profile",
+                )
+            elif arguments[:2] == ["git", "login"] and len(arguments) == 3:
+                login = await asyncio.to_thread(self.git.login_command, arguments[2])
+                self.action_terminal_open("side")
+                self.terminal_pane.run_command(login)
+            elif arguments == ["git", "status"]:
+                output = await asyncio.to_thread(self.git.status)
+                self.notify(output, title="Git status", timeout=15)
+            elif arguments == ["git", "pull"]:
+                output = await asyncio.to_thread(self.git.pull)
+                self.notify(output, title="Git pull", timeout=15)
+            elif arguments == ["git", "push"]:
+                output = await asyncio.to_thread(self.git.push)
+                self.notify(output, title="Git push", timeout=15)
+            else:
+                raise GitError(
+                    "Use :git profile add/list/use, :git login PROFILE, "
+                    ":git status, :git pull, or :git push"
+                )
+        except GitError as exc:
+            self.notify(str(exc), title="Git", severity="error", timeout=15)
+
+    def _configure_databricks_kernel(self, kernel: Optional[Kernel]) -> None:
+        if kernel is None or self.databricks_connection is None:
+            return
+        kernel.set_initialization_code(
+            databricks_kernel_code(
+                self.databricks_connection.profile,
+                self.databricks_connection.host,
+                self.databricks_connection.auth_type,
+            )
+        )
+
+    async def _connect_databricks(self, profile: Optional[str]) -> None:
+        target_label = profile or "default authentication"
+        self.notify(f"Connecting with {target_label}…", title="Databricks")
+        try:
+            connection = await asyncio.to_thread(connect_databricks, profile)
+        except Exception as exc:
+            self.notify(
+                f"{exc}\nConfigure authentication with `databricks auth login` and try again.",
+                title="Databricks connection failed",
+                severity="error",
+                timeout=15,
+            )
+            return
+        self.databricks_connection = connection
+        self.remote = None
+        kernels = {id(tab.kernel): tab.kernel for tab in self.tabs if tab.kernel is not None}
+        kernels[id(self.kernel)] = self.kernel
+        for kernel in kernels.values():
+            self._configure_databricks_kernel(kernel)
+        self.notify(
+            f"{connection.user_name} · {connection.host}\n"
+            "Python cells now include `workspace` and `dbutils`.",
+            title="Databricks connected",
+            timeout=12,
+        )
+
+    def _show_databricks_status(self) -> None:
+        connection = self.databricks_connection
+        if connection is None:
+            self.notify(
+                "Not connected. Use :databricks connect [profile].",
+                title="Databricks",
+            )
+            return
+        profile = connection.profile or connection.auth_type or "default authentication"
+        self.notify(
+            f"{connection.user_name} · {connection.host}\nProfile: {profile}",
+            title="Databricks connected",
+        )
 
     @work(exclusive=False)
     async def action_run_cell(self, advance: bool = False) -> None:
@@ -1119,6 +2222,21 @@ class NotebookApp(App[None]):
         self._save()
 
     def _save(self) -> bool:
+        if self.parquet_preview is not None:
+            self.notify("Parquet previews are read-only")
+            return True
+        if self.sql_document is not None:
+            self.notify("SQL workspace queries live for this session; copy them to a .sql file to save")
+            return True
+        if self.dataset_profile is not None:
+            self._save_profile()
+            return True
+        if self.remote_report is not None:
+            self.notify("Remote reports are read-only")
+            return True
+        if self.inspection_report is not None:
+            self.notify("Inspection reports are read-only")
+            return True
         if self.text_buffer is not None:
             if self.text_editor is not None:
                 self.text_buffer.text = self.text_editor.text
@@ -1126,6 +2244,7 @@ class NotebookApp(App[None]):
                 save_text_buffer(self.text_buffer)
                 self._quit_armed = False
                 self.notify(f"Saved {self.text_buffer.path.name}")
+                self._refresh_project_files()
                 self._refresh_tabs()
                 self._update_status()
                 return True
@@ -1141,6 +2260,7 @@ class NotebookApp(App[None]):
             save_notebook(self.notebook)
             self._quit_armed = False
             self.notify(f"Saved {self.notebook.path.name}")
+            self._refresh_project_files()
             self._refresh_tabs()
             self._update_status()
             return True
@@ -1150,6 +2270,10 @@ class NotebookApp(App[None]):
 
     @work(exclusive=True)
     async def action_interrupt(self) -> None:
+        if self.sql_document is not None and self.data_workspace is not None:
+            self.data_workspace.interrupt()
+            self.notify("SQL cancellation requested")
+            return
         await self.kernel.interrupt()
         self.notify("Kernel interrupted")
 
@@ -1187,6 +2311,8 @@ class NotebookApp(App[None]):
     async def on_unmount(self) -> None:
         await self.terminal_pane.shutdown()
         await self._shutdown_all_kernels()
+        if self.data_workspace is not None:
+            self.data_workspace.close()
 
     async def _shutdown_all_kernels(self) -> None:
         kernels = {id(tab.kernel): tab.kernel for tab in self.tabs if tab.kernel is not None}
