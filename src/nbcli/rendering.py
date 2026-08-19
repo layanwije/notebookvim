@@ -55,7 +55,12 @@ def render_output(output: Output):
     return Text(f"[{output.output_type} output]", style="dim")
 
 
-def render_cell(cell: Cell, index: int, show_output: bool = True):
+def render_cell(
+    cell: Cell,
+    index: int,
+    show_output: bool = True,
+    syntax_theme: str = "ansi_dark",
+):
     count = " " if cell.execution_count is None else str(cell.execution_count)
     kind = "Python" if cell.cell_type == CellType.CODE else cell.cell_type.value.title()
     header = Text()
@@ -73,7 +78,7 @@ def render_cell(cell: Cell, index: int, show_output: bool = True):
     if cell.cell_type == CellType.MARKDOWN:
         parts.append(LeftMarkdown(cell.source or " "))
     elif cell.cell_type == CellType.CODE:
-        parts.append(Syntax(cell.source or " ", "python", theme="ansi_dark", line_numbers=False,
+        parts.append(Syntax(cell.source or " ", "python", theme=syntax_theme, line_numbers=False,
                             word_wrap=False, background_color="default"))
     else:
         parts.append(Text(cell.source or " ", style="dim"))
