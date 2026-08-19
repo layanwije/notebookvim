@@ -3,12 +3,12 @@
 notebookvim is a keyboard-first CLI built for fast, focused development of data projects.
 
 Designed for developers and data enthusiasts who feel at home in Vim, it brings notebooks, code, data exploration, and project tools together in one streamlined terminal workspace—so you can move from an idea to working code without reaching for the mouse.
-* Vim-inspired editing — Navigate and edit notebooks, Python, SQL, and project files entirely from the keyboard.
-* Interactive execution — Run cells in a persistent kernel and preserve state as you experiment.
-* Built-in data exploration — Query local data with SQL, inspect datasets, and access profiling tools.
-* Databricks connectivity — Connect your local workflow to remote data and compute.
-* Integrated AI — Work with Codex, Claude, or Ollama without interrupting your flow.
-* Full terminal access — Run commands and manage your entire project from the same interface.
+* **Vim-inspired editing** — Navigate and edit notebooks, Python, SQL, and project files entirely from the keyboard.
+* **Interactive execution** — Run cells in a persistent kernel and preserve state as you experiment.
+* **Built-in data exploration** — Query local data with SQL, inspect datasets, and access profiling tools.
+* **Databricks connectivity** — Connect your local workflow to remote data and compute.
+* **Integrated AI** — Work with Codex, Claude, or Ollama without interrupting your flow.
+* **Full terminal access** — Run commands and manage your entire project from the same interface.
 
 Python and SQL are supported today, with Scala and R planned for future releases. A provider-neutral connectivity layer also lays the groundwork for platforms such as Microsoft Fabric.
 
