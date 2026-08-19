@@ -2,11 +2,12 @@ from pathlib import Path
 
 import pytest
 
-from nbcli.workspace import (
+from notebookcli.workspace import (
     is_parquet_file,
     load_parquet_preview,
     load_text_buffer,
     notebook_files,
+    project_directories,
     project_files,
     save_text_buffer,
 )
@@ -28,6 +29,7 @@ def test_project_files_are_sorted_include_hidden_and_ignore_generated_directorie
         tmp_path.joinpath("README.md").relative_to(tmp_path),
     ]
     assert notebook_files(tmp_path) == [tmp_path / "notebooks" / "analysis.ipynb"]
+    assert project_directories(tmp_path) == [tmp_path / "notebooks"]
 
 
 def test_text_buffer_loads_utf8_and_saves_atomically(tmp_path):

@@ -1,10 +1,31 @@
-# nbcli
+# notebookcli
 
-`nbcli` is a keyboard-driven notebook for the terminal. Version 0.1 focuses on
-the essential loop: open a Jupyter notebook, navigate and edit cells, execute
-them in one persistent kernel, inspect output, and save.
+`notebookcli` is a Vim-inspired terminal workspace for Jupyter notebooks and
+data engineering projects. Navigate and edit notebooks or source files, run
+cells in a persistent kernel, explore data with local SQL and profiling tools,
+and manage an entire project without leaving the command line. It includes an
+integrated terminal, AI assistance powered by Codex, Claude, or Ollama, and
+connectivity for data platforms such as Databricks, with a provider-neutral
+foundation designed to support platforms such as Microsoft Fabric.
 
-## Install for development
+## Install
+
+Install the published package with pip:
+
+```bash
+python -m pip install notebookcli
+```
+
+For an isolated command-line installation, use `pipx`:
+
+```bash
+pipx install notebookcli
+```
+
+The package installs the `notebookcli` command. The `nbcli` package on PyPI is
+an unrelated NetBox command-line tool.
+
+### Development setup
 
 ```bash
 python3 -m venv .venv
@@ -16,15 +37,15 @@ python -m pip install -e '.[dev]'
 
 ```bash
 cd path/to/project
-nbcli
+notebookcli
 
-nbcli new experiment.ipynb
-nbcli experiment.ipynb
-nbcli path/to/project
+notebookcli new experiment.ipynb
+notebookcli experiment.ipynb
+notebookcli path/to/project
 ```
 
-Opening `nbcli` without a path starts a project workspace in the current
-directory. Use `Ctrl+B` to toggle the project tree and `Ctrl+P` to fuzzy-find a
+Opening `notebookcli` without a path starts a project workspace in the current
+directory. Use `Ctrl+E` to toggle the project tree and `Ctrl+P` to fuzzy-find a
 file. Selecting a notebook or supported UTF-8 text file opens it without leaving
 the application. Python, Markdown, JSON, TOML, YAML, SQL, shell, and other common
 source files receive syntax highlighting; use `Ctrl+S` to save and `Ctrl+Q` to
@@ -99,8 +120,9 @@ to the source while working, and close a pinned report with `Escape` or
 :inspect close
 ```
 
-The terminal and inspection report share the auxiliary split area, so opening
-one closes the other instead of squeezing the source into three panes.
+The terminal, AI assistant, and inspection report share the auxiliary split
+area, so opening one closes the others instead of squeezing the source into
+three panes.
 
 ### Local SQL and dataset profiles
 
@@ -139,14 +161,14 @@ Shift+Tab       Move to the next open tab
 Ctrl+Shift+Tab  Move to the previous open tab
 Ctrl+W          Close the active tab (`:tab close` also works)
 Escape, then q  Close the active file/tab
-Ctrl+B, then t  Terminal-safe way to focus the browser and open a file in a tab
+Ctrl+E, then t  Terminal-safe way to focus the browser and open a file in a tab
 Escape, then ]/[ Terminal-safe next / previous tab
 u / Ctrl+R      Undo / redo in Normal mode
 :               Open commands in Normal mode
 ```
 
 The status bar keeps the essential controls visible: `:` for commands,
-`:help`, `Ctrl+B` for files, `i` to edit, `Ctrl+S` to save, and `Ctrl+Q` to
+`:help`, `Ctrl+E` for files, `i` to edit, `Ctrl+S` to save, and `Ctrl+Q` to
 exit. Closing the final tab leaves the project browser and command system open
 and shows the Notebook CLI welcome screen. From there, open another file or use
 `Esc`, then `:` to enter a command, just as you would return to commands in Vim.
@@ -154,35 +176,6 @@ and shows the Notebook CLI welcome screen. From there, open another file or use
 Python text files and Python notebook cells receive local Jedi completions;
 press `Tab` to accept a displayed completion. Markdown and other supported text
 files retain syntax highlighting without Python completions.
-
-Switch the entire interface palette at runtime with `:theme NAME`. The theme
-updates application chrome, notebook cells, editors, syntax colors, selections,
-overlays, tables, and the integrated terminal together. Seven themes are built in:
-
-```text
-:theme default             Original nbcli appearance
-:theme vscode-dark         VS Code Dark Modern-inspired dark palette
-:theme vscode-light        VS Code Light Modern-inspired light palette
-:theme databricks-light    Databricks workspace-inspired light palette
-:theme databricks-dark     Databricks navy-and-lava dark palette
-:theme snowflake-light     Snowflake Workspaces-inspired airy light palette
-:theme snowflake-dark      Snowflake-inspired deep navy editor palette
-```
-
-Use `:theme` without a name to see the active theme and available choices.
-The last selected theme is saved in the user-level nbcli settings file and is
-restored the next time the application starts. Set `NBCLI_CONFIG_HOME` to use a
-custom settings directory.
-The Python and SQL editors use a dedicated token palette for every named theme,
-including theme-specific colors for keywords, strings, numbers, functions,
-types, variables, fields, comments, punctuation, and built-ins.
-
-nbcli cannot change the font face from inside a terminal: the terminal performs
-font rendering for the entire character grid. `:theme` therefore reports the
-recommended terminal-profile font for the selected theme: the platform VS Code
-default (Menlo, Consolas, or Droid Sans Mono), DM Mono for Databricks, and
-JetBrains Mono or Apercu Mono for Snowflake. Configure that face in Terminal,
-iTerm2, Windows Terminal, or the VS Code integrated-terminal profile.
 
 Editable files open in Vim-style Normal mode and cannot be changed until you
 press `i`, `a`, `I`, `A`, `o`, or `O`. The status bar shows `NORMAL`, `INSERT`,
@@ -228,7 +221,7 @@ code cell.
 Notebook and kernel commands include `:notebook run all`, `:notebook save`,
 `:kernel info`, `:kernel interrupt`, `:kernel restart`, and `:kernel shutdown`.
 Use `:help` in the application for the complete list. `:q` closes the active
-file/tab—including the final tab—while `:wq` saves and closes it. `:exit` exits nbcli after the usual
+file/tab—including the final tab—while `:wq` saves and closes it. `:exit` exits notebookcli after the usual
 unsaved-work confirmation. Other short aliases include `:run`,
 `:output clear`, and `:w`.
 
@@ -239,21 +232,68 @@ file by its workspace-relative path with `:file open reports/sales.py`, or open
 it in a new tab with `:tab open reports/sales.py`; both commands complete file
 paths from the current project, including subdirectories.
 
+Create an empty file with `:file new reports/summary.py` or the equivalent
+`:file create reports/summary.py`. You can also right-click a folder in the file
+explorer and enter a filename; right-clicking a file uses its parent folder.
+
+Run `notebookcli` with no argument to start with no project open; use `notebookcli .` to
+open the current folder. Switch projects without leaving notebookcli using `:project open foldername` or its
+alias `:folder open foldername`. Both commands complete folders inside the
+current project; you may also type an absolute path or a relative path such as
+`../another-project`. Unsaved files must be saved or closed before switching.
+Use `:project close` or `:folder close` to clear the active project and return
+to the welcome screen.
+
+Initialize a Databricks-oriented medallion project in the current folder with
+`:project scaffold init data-engineering`. It adds Bronze, Silver, and Gold
+starter notebooks alongside `src`, `sql`, and `tests` folders, a README,
+requirements, and a `.gitignore`. Existing files are always preserved, so the
+command is safe to run again.
+file/tab, `:wq` saves and closes it, and `:exit` exits notebookcli after the usual
+unsaved-work confirmation. Other short aliases include `:run`,
+`:output clear`, and `:w`.
+
 Open a workspace terminal beside the active document with `:terminal`,
 `:terminal open`, or `:terminal open side`. Use `:terminal open below` for a
-lower split and hide either layout with `:terminal close`. The terminal keeps its current
-directory and command history while hidden. Use Up/Down for history, Ctrl+L to
-clear its output, Ctrl+C to interrupt a running command, and Escape to return
-focus to the editor. It uses a VS Code-style dark terminal background,
-foreground, and 16-color ANSI palette. It is a lightweight command shell for builds, tests, and
-project commands; full-screen interactive terminal programs are not supported.
+lower split and hide either layout with `:terminal close`. The terminal keeps
+its current directory and command history while hidden. Submitted lines are
+forwarded to a running process, so prompts, confirmations, and interactive CLIs
+work. Use Up/Down for history, Ctrl+L to clear its output, Ctrl+C to interrupt a
+running command, and Escape to return focus to the editor. It uses a VS
+Code-style dark terminal background, foreground, and 16-color ANSI palette.
+Full-screen programs that require complete terminal-screen emulation should be
+launched with a non-alternate-screen option when available.
 Commands run through the configured macOS login shell in interactive mode, so
 normal shell startup files and aliases are loaded. ANSI and true-color output
 is preserved inside the terminal frame.
 
+### AI assistants
+
+Open the AI side pane with `:ai` or `:ai open`, or place it beneath the document
+with `:ai open below`. It streams answers and includes
+the active file plus a bounded snapshot of the selected notebook cell, text
+file, or SQL query. `Ctrl+C` cancels a request and `Escape` returns to the
+document.
+
+```text
+:ai status                 Show which provider CLIs are installed
+:ai provider codex         Use Codex CLI
+:ai provider claude        Use Claude Code
+:ai provider ollama qwen2.5-coder:7b
+                           Use Ollama with a specific installed model
+:ai ask Explain this cell  Open the pane and send a prompt
+:ai interrupt              Stop the running AI request and keep the pane open
+:ai close                  Close the pane
+```
+
+The selected provider and Ollama model are saved in user settings. If the model
+is omitted, `NBCLI_OLLAMA_MODEL` or `llama3.2` is used. Provider runs use safe
+analysis modes: Codex uses a read-only sandbox and Claude Code uses plan mode.
+Ollama receives prompt context without shell or file-editing tools.
+
 ### Databricks
 
-Authenticate with the Databricks CLI, then connect the current nbcli session:
+Authenticate with the Databricks CLI, then connect the current notebookcli session:
 
 ```text
 :databricks connect
@@ -263,7 +303,7 @@ Authenticate with the Databricks CLI, then connect the current nbcli session:
 ```
 
 Passing a workspace URL opens browser-based OAuth, which is the easiest route
-for Databricks Free Edition. With no argument, nbcli uses default unified
+for Databricks Free Edition. With no argument, notebookcli uses default unified
 authentication; a non-URL argument selects a named Databricks profile.
 
 After connecting, Python notebook cells automatically receive `workspace` (a
@@ -331,7 +371,7 @@ Databricks jobs use the same authenticated connection:
 
 The job and run views show identifiers, state, result, start time, duration,
 parameters, compute ID, and the Databricks run link. A run ID can be omitted
-from logs, cancel, and rerun immediately after `:databricks run`; nbcli remembers
+from logs, cancel, and rerun immediately after `:databricks run`; notebookcli remembers
 the most recently started run. Follow mode refreshes every two seconds until a
 terminal state is reported.
 
@@ -348,7 +388,7 @@ conversion, job execution, and log retrieval still require a Fabric adapter.
 
 Named Git profiles keep commit identity and provider account selection together.
 Credentials remain in GitHub CLI, Git Credential Manager, or the operating
-system credential store; nbcli never stores access tokens or passwords.
+system credential store; notebookcli never stores access tokens or passwords.
 
 ```text
 :git profile add personal github laivw me@example.com "My Name"
@@ -369,9 +409,9 @@ so it does not change the identity of unrelated projects.
 Other commands:
 
 ```bash
-nbcli run experiment.ipynb
-nbcli info experiment.ipynb
-nbcli --help
+notebookcli run experiment.ipynb
+notebookcli info experiment.ipynb
+notebookcli --help
 ```
 
 ## Development

@@ -1,11 +1,11 @@
 from rich.console import Console
 
-from nbcli.model import Cell, CellType, DisplayOutput, ErrorOutput, StreamOutput
-from nbcli.rendering import render_cell, safe_text
+from notebookcli.model import Cell, CellType, DisplayOutput, ErrorOutput, StreamOutput
+from notebookcli.rendering import render_cell, safe_text
 
 
 def test_safe_text_removes_terminal_control_sequences():
-    value = "safe\x1b[2J\x1b]0;owned\x07 text\x00"
+    value = "safe\x1b[2J\x1b]0;owned\x07 text\x00\r"
     assert safe_text(value) == "safe text"
 
 

@@ -1,7 +1,7 @@
 import pytest
 
-from nbcli.kernel import Kernel, kernel_environment
-from nbcli.model import Cell, CellType, DisplayOutput, ExecutionState
+from notebookcli.kernel import Kernel, kernel_environment
+from notebookcli.model import Cell, CellType, DisplayOutput, ExecutionState
 
 
 @pytest.mark.asyncio
@@ -39,7 +39,7 @@ def test_kernel_discovers_spark_python_paths(tmp_path, monkeypatch):
 
     monkeypatch.delenv("SPARK_HOME", raising=False)
     monkeypatch.delenv("PYTHONPATH", raising=False)
-    monkeypatch.setattr("nbcli.kernel.shutil.which", lambda command: str(spark_submit))
+    monkeypatch.setattr("notebookcli.kernel.shutil.which", lambda command: str(spark_submit))
 
     environment = kernel_environment()
 

@@ -28,7 +28,14 @@ COMMANDS = (
     "kernel interrupt",
     "kernel restart",
     "kernel shutdown",
+    "folder open",
+    "folder close",
+    "project open",
+    "project close",
+    "project scaffold init data-engineering",
     "file open",
+    "file new",
+    "file create",
     "tab open",
     "tab next",
     "tab previous",
@@ -39,6 +46,18 @@ COMMANDS = (
     "terminal open side",
     "terminal open below",
     "terminal close",
+    "ai",
+    "ai open",
+    "ai open side",
+    "ai open below",
+    "ai close",
+    "ai interrupt",
+    "ai status",
+    "ai provider codex",
+    "ai provider claude",
+    "ai provider ollama",
+    "ai provider ollama llama3.2",
+    "ai ask",
     "sql",
     "sql new",
     "sql run",
@@ -131,10 +150,14 @@ COMMAND_SUGGESTIONS = (*COMMANDS, *ALIASES.keys())
 
 def normalize_command(value: str) -> str:
     original = " ".join(value.strip().lstrip(":").split())
-    file_open = re.fullmatch(r"(file open|tab open)(?: (.+))?", original, re.IGNORECASE)
-    if file_open:
-        operation = file_open.group(1).lower()
-        path = file_open.group(2)
+    path_open = re.fullmatch(
+        r"(folder open|project open|file open|file new|file create|tab open)(?: (.+))?",
+        original,
+        re.IGNORECASE,
+    )
+    if path_open:
+        operation = path_open.group(1).lower()
+        path = path_open.group(2)
         return operation + (f" {path}" if path else "")
     profile_connect = re.fullmatch(r"databricks connect(?: (.+))?", original, re.IGNORECASE)
     if profile_connect:
@@ -156,6 +179,15 @@ def normalize_command(value: str) -> str:
         operation = remote_arguments.group(1).lower()
         arguments = remote_arguments.group(2)
         return f"databricks {operation}" + (f" {arguments}" if arguments else "")
+    ai_prompt = re.fullmatch(r"ai ask(?: (.+))?", original, re.IGNORECASE)
+    if ai_prompt:
+        prompt = ai_prompt.group(1)
+        return "ai ask" + (f" {prompt}" if prompt else "")
+    ai_provider = re.fullmatch(r"ai provider (codex|claude|ollama)(?: (\S+))?", original, re.IGNORECASE)
+    if ai_provider:
+        provider = ai_provider.group(1).lower()
+        model = ai_provider.group(2)
+        return f"ai provider {provider}" + (f" {model}" if model else "")
     command = original.lower()
     numbered_run = re.fullmatch(r"(?:run cell|cell run) (\d+)", command)
     if numbered_run:

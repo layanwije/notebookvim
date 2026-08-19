@@ -1,4 +1,4 @@
-from nbcli.commands import COMMAND_SUGGESTIONS, normalize_command
+from notebookcli.commands import COMMAND_SUGGESTIONS, normalize_command
 
 
 def test_command_aliases_are_normalized():
@@ -13,12 +13,20 @@ def test_command_aliases_are_normalized():
     assert normalize_command(":run cell 2") == "cell run 2"
     assert normalize_command(":cell run 12") == "cell run 12"
     assert normalize_command(":file open Reports/My File.py") == "file open Reports/My File.py"
+    assert normalize_command(":file new Reports/My File.py") == "file new Reports/My File.py"
+    assert normalize_command(":file create Reports/My File.py") == "file create Reports/My File.py"
     assert normalize_command(":tab open Reports/My File.py") == "tab open Reports/My File.py"
+    assert normalize_command(":project open Data Lake") == "project open Data Lake"
+    assert normalize_command(":folder open Data Lake") == "folder open Data Lake"
     assert normalize_command(":databricks connect MyProfile") == "databricks connect MyProfile"
     assert normalize_command(":git profile use Work") == "git profile use Work"
     assert normalize_command(
         ':git profile add Work github octocat octo@example.com "Octo Cat"'
     ) == 'git profile add Work github octocat octo@example.com "Octo Cat"'
+    assert normalize_command(":ai ask Explain MyClass") == "ai ask Explain MyClass"
+    assert normalize_command(":AI Provider Ollama Qwen2.5-Coder:7B") == (
+        "ai provider ollama Qwen2.5-Coder:7B"
+    )
 
 
 def test_completion_catalog_contains_full_commands_and_aliases():
@@ -31,6 +39,10 @@ def test_completion_catalog_contains_full_commands_and_aliases():
     assert "terminal close" in COMMAND_SUGGESTIONS
     assert "terminal open side" in COMMAND_SUGGESTIONS
     assert "terminal open below" in COMMAND_SUGGESTIONS
+    assert "ai provider codex" in COMMAND_SUGGESTIONS
+    assert "ai provider claude" in COMMAND_SUGGESTIONS
+    assert "ai provider ollama" in COMMAND_SUGGESTIONS
+    assert "ai interrupt" in COMMAND_SUGGESTIONS
     assert "databricks connect" in COMMAND_SUGGESTIONS
     assert "databricks status" in COMMAND_SUGGESTIONS
     assert "git profile add" in COMMAND_SUGGESTIONS
@@ -48,6 +60,12 @@ def test_completion_catalog_contains_full_commands_and_aliases():
     assert "theme snowflake-light" in COMMAND_SUGGESTIONS
     assert "theme snowflake-dark" in COMMAND_SUGGESTIONS
     assert "file open" in COMMAND_SUGGESTIONS
+    assert "file new" in COMMAND_SUGGESTIONS
+    assert "file create" in COMMAND_SUGGESTIONS
+    assert "ai open below" in COMMAND_SUGGESTIONS
+    assert "project open" in COMMAND_SUGGESTIONS
+    assert "project close" in COMMAND_SUGGESTIONS
+    assert "project scaffold init data-engineering" in COMMAND_SUGGESTIONS
 
 
 def test_remote_command_arguments_preserve_case():

@@ -11,7 +11,7 @@ from . import __version__
 from .kernel import ExecutionUpdate, Kernel
 from .model import CellType
 from .storage import load_notebook, new_notebook, save_notebook
-from .tui import run_tui, run_workspace
+from .tui import run_empty_workspace, run_tui, run_workspace
 from .workspace import is_supported_text_file
 
 app = typer.Typer(add_completion=False, no_args_is_help=False,
@@ -20,7 +20,7 @@ app = typer.Typer(add_completion=False, no_args_is_help=False,
 
 def version_callback(value: bool) -> None:
     if value:
-        typer.echo(f"nbcli {__version__}")
+        typer.echo(f"notebookcli {__version__}")
         raise typer.Exit()
 
 
@@ -31,16 +31,19 @@ def root_command(
 ) -> None:
     """A terminal-native notebook and project workspace.
 
-    Run nbcli without arguments to browse the current project, or pass a
+    Run notebookcli without arguments to browse the current project, or pass a
     directory, notebook, or supported text-file path directly.
     """
 
 
 @app.command("open", hidden=True)
 def open_command(
-    target: Path = typer.Argument(Path("."), help="Project directory or supported file path."),
+    target: Optional[Path] = typer.Argument(None, help="Project directory or supported file path."),
 ) -> None:
     """Open a project, notebook, or text file in the interactive terminal UI."""
+    if target is None:
+        run_empty_workspace()
+        return
     if not target.exists():
         raise typer.BadParameter(f"Path does not exist: {target}")
     if target.is_dir():
@@ -111,12 +114,12 @@ def run(
 
 
 def _normalized_cli_args(args: list[str]) -> list[str]:
-    # Preserve the canonical `nbcli notebook.ipynb` interface while retaining
+    # Preserve the canonical `notebookcli notebook.ipynb` interface while retaining
     # an unambiguous command tree for Typer/Click.
     args = list(args)
     commands = {"new", "info", "run", "open"}
     if not args:
-        args = ["open", "."]
+        args = ["open"]
     elif not args[0].startswith("-") and args[0] not in commands:
         args.insert(0, "open")
     return args
@@ -124,4 +127,4 @@ def _normalized_cli_args(args: list[str]) -> list[str]:
 
 def main() -> None:
     args = _normalized_cli_args(sys.argv[1:])
-    app(args=args, prog_name="nbcli")
+    app(args=args, prog_name="notebookcli")

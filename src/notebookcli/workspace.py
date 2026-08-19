@@ -227,5 +227,18 @@ def project_files(root: Path) -> list[Path]:
     return sorted(files, key=lambda path: str(path.relative_to(root)).lower())
 
 
+def project_directories(root: Path) -> list[Path]:
+    """Return navigable project directories, including ordinary dot-directories."""
+    root = Path(root).resolve()
+    directories: list[Path] = []
+    for path in root.rglob("*"):
+        relative = path.relative_to(root)
+        if any(part in IGNORED_DIRECTORIES for part in relative.parts):
+            continue
+        if path.is_dir():
+            directories.append(path)
+    return sorted(directories, key=lambda path: str(path.relative_to(root)).lower())
+
+
 def notebook_files(root: Path) -> list[Path]:
     return [path for path in project_files(root) if path.suffix.lower() == ".ipynb"]

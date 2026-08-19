@@ -13,7 +13,9 @@ from .model import Cell, CellType, DisplayOutput, ErrorOutput, Output, StreamOut
 
 
 _ANSI = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\)|[@-Z\\-_])")
-_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+# Preserve tabs and newlines, but strip carriage returns and terminal controls.
+# Static widgets cannot safely interpret cursor movement intended for a terminal.
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 MAX_OUTPUT_CHARS = 100_000
 
 

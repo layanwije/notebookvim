@@ -1,4 +1,4 @@
-from nbcli.themes import (
+from notebookcli.themes import (
     APP_THEMES,
     EDITOR_THEMES,
     EDITOR_THEME_NAMES,

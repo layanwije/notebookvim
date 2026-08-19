@@ -3,19 +3,19 @@ import sys
 
 from typer.testing import CliRunner
 
-from nbcli import cli
+from notebookcli import cli
 
 
 def test_new_and_info_commands(tmp_path):
     path = tmp_path / "cli.ipynb"
     created = subprocess.run(
-        [sys.executable, "-m", "nbcli", "new", str(path)],
+        [sys.executable, "-m", "notebookcli", "new", str(path)],
         check=True,
         capture_output=True,
         text=True,
     )
     inspected = subprocess.run(
-        [sys.executable, "-m", "nbcli", "info", str(path)],
+        [sys.executable, "-m", "notebookcli", "info", str(path)],
         check=True,
         capture_output=True,
         text=True,
@@ -34,8 +34,18 @@ def test_workspace_paths_are_routed_to_open_command(tmp_path, monkeypatch):
 
     assert result.exit_code == 0
     assert opened == [tmp_path]
-    assert cli._normalized_cli_args([]) == ["open", "."]
+    assert cli._normalized_cli_args([]) == ["open"]
     assert cli._normalized_cli_args(["."]) == ["open", "."]
+
+
+def test_no_argument_launches_an_empty_project(monkeypatch):
+    opened = []
+    monkeypatch.setattr(cli, "run_empty_workspace", lambda: opened.append(True))
+
+    result = CliRunner().invoke(cli.app, ["open"])
+
+    assert result.exit_code == 0
+    assert opened == [True]
 
 
 def test_text_file_path_opens_inside_its_workspace(tmp_path, monkeypatch):

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import nbformat
 import pytest
 
-from nbcli.remote import DatabricksRemote, RemoteError
+from notebookcli.remote import DatabricksRemote, RemoteError
 
 
 def notebook_bytes(source: str) -> bytes:

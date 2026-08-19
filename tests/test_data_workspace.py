@@ -3,7 +3,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from nbcli.data_workspace import DuckDBWorkspace
+from notebookcli.data_workspace import DuckDBWorkspace
 
 
 def test_duckdb_workspace_runs_bounded_queries_and_tracks_history():

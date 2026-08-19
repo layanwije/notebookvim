@@ -113,6 +113,13 @@ class TerminalPane(Vertical):
     def _update_prompt(self) -> None:
         self.query_one("#terminal-input", TerminalInput).placeholder = f"{self.cwd}  $"
 
+    def set_workspace(self, workspace_root: Path) -> None:
+        """Use a project folder as the default directory for later commands."""
+        self.previous_cwd = self.cwd
+        self.cwd = Path(workspace_root).resolve()
+        self._update_prompt()
+        self._write(f"nbcli workspace · {self.cwd}", style="bold cyan")
+
     def _write(self, value: str, style: str = "") -> None:
         clean = safe_text(value)
         self.transcript.append(clean)
@@ -138,12 +145,13 @@ class TerminalPane(Vertical):
         if event.input.id != "terminal-input":
             return
         event.stop()
-        command = event.value.strip()
+        raw_value = event.value
+        command = raw_value.strip()
         event.input.value = ""
-        if not command:
-            return
         if self.process is not None:
-            self._write("A command is already running; press Ctrl+C to interrupt it", "yellow")
+            self.send_input(raw_value + "\n")
+            return
+        if not command:
             return
         self.history.append(command)
         self.history_index = len(self.history)
@@ -154,6 +162,17 @@ class TerminalPane(Vertical):
             self.clear()
             return
         self.run_command(command)
+
+    def send_input(self, value: str) -> bool:
+        """Forward user input to the foreground process through its PTY."""
+        if self.process is None or self.master_fd is None:
+            return False
+        try:
+            os.write(self.master_fd, value.encode("utf-8"))
+        except OSError as exc:
+            self._write(f"terminal input: {exc}", "red")
+            return False
+        return True
 
     def _change_directory(self, command: str) -> bool:
         try:
@@ -185,7 +204,7 @@ class TerminalPane(Vertical):
     @work(exclusive=True)
     async def run_command(self, command: str) -> None:
         terminal_input = self.query_one("#terminal-input", TerminalInput)
-        terminal_input.placeholder = f"{self.cwd}  running…  (Ctrl+C to interrupt)"
+        terminal_input.placeholder = "Send input to running process…  (Ctrl+C to interrupt)"
         shell = os.environ.get("SHELL") or "/bin/sh"
         master_fd, slave_fd = pty.openpty()
         self.master_fd = master_fd

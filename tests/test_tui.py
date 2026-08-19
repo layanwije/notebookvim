@@ -3,15 +3,64 @@ from pathlib import Path
 
 import pytest
 
-from nbcli.workspace import ParquetPreview
-from nbcli.kernel import ExecutionUpdate
-from nbcli.databricks import DatabricksConnection
-from nbcli.model import Cell, CellType, ExecutionState, Notebook, StreamOutput
-from nbcli.preferences import load_theme, save_theme
-from nbcli.remote import RemoteMapping, SyncStatus
-from nbcli.storage import load_notebook, new_notebook, save_notebook
-from nbcli.terminal import TerminalInput, TerminalPane
-from nbcli.tui import EmptyWorkspace, InspectionModal, NotebookApp, TabBar
+from notebookcli.workspace import ParquetPreview
+from notebookcli.kernel import ExecutionUpdate
+from notebookcli.databricks import DatabricksConnection
+from notebookcli.model import Cell, CellType, ExecutionState, Notebook, StreamOutput
+from notebookcli.preferences import load_theme, save_theme
+from notebookcli.remote import RemoteMapping, SyncStatus
+from notebookcli.storage import load_notebook, new_notebook, save_notebook
+from notebookcli.terminal import TerminalInput, TerminalPane
+from notebookcli.themes import RICH_SYNTAX_THEMES
+from notebookcli.ai_pane import AIPane
+from notebookcli.tui import EmptyWorkspace, InspectionModal, NotebookApp, TabBar
+
+
+@pytest.mark.asyncio
+async def test_ai_pane_opens_and_switches_provider(tmp_path, monkeypatch):
+    monkeypatch.setenv("NBCLI_CONFIG_HOME", str(tmp_path / "config"))
+    notebook = Notebook(
+        path=tmp_path / "example.ipynb",
+        cells=[Cell(CellType.CODE, "answer = 42", cell_id="cell0001")],
+    )
+    app = NotebookApp(notebook, workspace_root=tmp_path)
+
+    async with app.run_test(size=(120, 36)) as pilot:
+        await app._dispatch_command("ai")
+        await pilot.pause()
+        pane = app.query_one("#ai-pane", AIPane)
+        assert pane.display
+        assert "answer = 42" in app.ai_context()
+
+        await app._dispatch_command("ai provider ollama qwen2.5-coder:7b")
+        await pilot.pause()
+        assert pane.provider_name == "ollama"
+        assert pane.provider.model == "qwen2.5-coder:7b"
+
+        await app._dispatch_command("ai close")
+        assert not pane.display
+
+
+@pytest.mark.asyncio
+async def test_ai_pane_can_open_below_and_return_to_default_side(tmp_path, monkeypatch):
+    monkeypatch.setenv("NBCLI_CONFIG_HOME", str(tmp_path / "config"))
+    notebook = Notebook(
+        path=tmp_path / "example.ipynb",
+        cells=[Cell(CellType.CODE, "answer = 42", cell_id="cell0001")],
+    )
+    app = NotebookApp(notebook, workspace_root=tmp_path)
+
+    async with app.run_test(size=(110, 34)):
+        document = app.query_one("#document-column")
+        pane = app.query_one("#ai-pane", AIPane)
+
+        await app._dispatch_command("ai open below")
+        assert pane.display
+        assert document.has_class("ai-below")
+
+        await app._dispatch_command("ai open side")
+        assert document.has_class("ai-side")
+        assert not document.has_class("ai-below")
 
 
 @pytest.mark.asyncio
@@ -34,7 +83,7 @@ async def test_navigation_and_editing(tmp_path, monkeypatch):
         await pilot.press("k", "i")
         assert app.editor is not None
         assert app.editor.language == "python"
-        assert app.editor.theme == "monokai"
+        assert app.editor.theme == "nbcli-databricks-dark"
         app.editor.text = "value = 2"
         await pilot.press("escape", "escape")
         await pilot.pause()
@@ -99,8 +148,8 @@ async def test_app_themes_switch_chrome_editor_and_syntax_palette(tmp_path, monk
     app = NotebookApp(notebook)
 
     async with app.run_test(size=(100, 32)) as pilot:
-        assert app.theme == "default"
-        assert app.syntax_theme == "ansi_dark"
+        assert app.theme == "databricks-dark"
+        assert app.syntax_theme is RICH_SYNTAX_THEMES["databricks-dark"]
 
         for name in (
             "vscode-dark", "vscode-light", "databricks-light", "databricks-dark",
@@ -416,12 +465,62 @@ async def test_workspace_tree_uses_neovim_navigation_toggle(tmp_path):
         tree = app.query_one("#files")
         assert tree.display and not tree.has_focus
 
-        await pilot.press("ctrl+b", "j")
+        await pilot.press("ctrl+e", "j")
         assert tree.has_focus
         assert tree.cursor_line > 0
 
-        await pilot.press("ctrl+b")
+        await pilot.press("ctrl+e")
         assert not tree.display
+
+
+@pytest.mark.asyncio
+async def test_file_new_and_create_commands_create_empty_project_files(tmp_path):
+    notebook_path = tmp_path / "notes.ipynb"
+    save_notebook(new_notebook(notebook_path))
+    (tmp_path / "reports").mkdir()
+    app = NotebookApp(new_notebook(notebook_path), workspace_root=tmp_path)
+
+    async with app.run_test(size=(100, 30)):
+        await app._dispatch_command("file new reports/summary.py")
+        await app._dispatch_command("file create notes.txt")
+
+        assert (tmp_path / "reports" / "summary.py").read_bytes() == b""
+        assert (tmp_path / "notes.txt").read_bytes() == b""
+        assert (tmp_path / "reports" / "summary.py").resolve() in app.project_paths
+        assert (tmp_path / "notes.txt").resolve() in app.project_paths
+
+
+@pytest.mark.asyncio
+async def test_new_file_prompt_targets_selected_folder(tmp_path):
+    notebook_path = tmp_path / "notes.ipynb"
+    save_notebook(new_notebook(notebook_path))
+    folder = tmp_path / "reports"
+    folder.mkdir()
+    app = NotebookApp(new_notebook(notebook_path), workspace_root=tmp_path)
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.prompt_new_file(folder)
+        await pilot.pause()
+        name = app.screen.query_one("#new-file-name")
+        name.value = "created.py"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert (folder / "created.py").read_bytes() == b""
+
+
+@pytest.mark.asyncio
+async def test_project_scaffold_command_initializes_and_refreshes_explorer(tmp_path):
+    notebook_path = tmp_path / "notes.ipynb"
+    save_notebook(new_notebook(notebook_path))
+    app = NotebookApp(new_notebook(notebook_path), workspace_root=tmp_path)
+
+    async with app.run_test(size=(100, 30)):
+        await app._dispatch_command("project scaffold init data-engineering")
+
+        ingest = tmp_path / "notebooks" / "bronze" / "ingest.py"
+        assert ingest.is_file()
+        assert ingest.resolve() in app.project_paths
 
 
 @pytest.mark.asyncio
@@ -452,7 +551,7 @@ async def test_workspace_opens_parquet_as_a_read_only_preview(tmp_path, monkeypa
         rows=[["opened", 1]],
         total_rows=1,
     )
-    monkeypatch.setattr("nbcli.tui.load_parquet_preview", lambda path: preview)
+    monkeypatch.setattr("notebookcli.tui.load_parquet_preview", lambda path: preview)
     app = NotebookApp(new_notebook(notebook_path), workspace_root=tmp_path)
 
     async with app.run_test(size=(100, 30)):
@@ -791,6 +890,67 @@ async def test_command_dropdown_completes_theme_options_and_relative_project_fil
 
 
 @pytest.mark.asyncio
+async def test_project_open_switches_workspace_without_enumerating_folders(tmp_path, monkeypatch):
+    notebook_path = tmp_path / "notes.ipynb"
+    project = tmp_path / "analytics"
+    project.mkdir()
+    (project / "pipeline.py").write_text("print('ready')\n", encoding="utf-8")
+    save_notebook(new_notebook(notebook_path))
+    app = NotebookApp(new_notebook(notebook_path), workspace_root=tmp_path)
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        monkeypatch.setattr(
+            "notebookcli.tui.project_directories",
+            lambda _root: (_ for _ in ()).throw(AssertionError("folders were enumerated")),
+        )
+        await pilot.press("colon")
+        command = app.query_one("#command")
+        command.value = "project open"
+        await pilot.pause()
+        assert app._command_option_values == []
+
+        command.value = "folder open ana"
+        await pilot.pause()
+        assert app._command_option_values == []
+
+        await app._dispatch_command("project open analytics")
+        assert app.workspace_root == project.resolve()
+        assert app.tabs == []
+        assert app.terminal_pane.cwd == project.resolve()
+        assert app.ai_pane.workspace_root == project.resolve()
+        assert "pipeline.py" in [path.name for path in app.project_paths]
+        assert app.query_one("#files").root.data == project.resolve()
+
+        await app._dispatch_command("folder close")
+        assert not app.project_open
+        assert app.tabs == []
+        assert app.project_paths == []
+        assert str(app.query_one("#files").root.label) == "No project"
+
+        await app._dispatch_command("folder open .")
+        assert app.project_open
+        assert app.workspace_root == project.resolve()
+        assert "pipeline.py" in [path.name for path in app.project_paths]
+
+
+@pytest.mark.asyncio
+async def test_empty_project_starts_without_tabs_or_project_files(tmp_path):
+    app = NotebookApp(
+        new_notebook(tmp_path / "untitled.ipynb"),
+        workspace_root=tmp_path,
+        project_open=False,
+    )
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        assert not app.project_open
+        assert app.tabs == []
+        assert app.project_paths == []
+        assert str(app.query_one("#files").root.label) == "No project"
+        assert app.query_one("#empty-workspace").has_focus
+
+
+@pytest.mark.asyncio
 async def test_tab_close_activates_neighbor_and_reindexes_tabs(tmp_path):
     notebook_path = tmp_path / "notes.ipynb"
     first = tmp_path / "first.py"
@@ -835,10 +995,12 @@ async def test_last_tab_closes_to_welcome_and_files_can_be_reopened(tmp_path):
         assert app.active_tab_index == -1
         assert app.query_one("#tabs", TabBar).tab_count == 0
         welcome = app.query_one("#empty-workspace", EmptyWorkspace)
-        assert "Vim-like experience for the World of Data" in str(welcome.render())
-        assert "Esc" in str(welcome.render())
+        welcome_text = str(welcome.render())
+        assert "Vim-like experience for the World of Data" in welcome_text
+        for hint in ("Esc", ":folder open path", ":terminal", ":ai", "Ctrl+E"):
+            assert hint in welcome_text
         status = str(app.query_one("#status").render())
-        for shortcut in (": cmd", ":help", "Ctrl+B", "i edit", "Ctrl+S", "Ctrl+Q"):
+        for shortcut in (": cmd", ":help", "Ctrl+E", "i edit", "Ctrl+S", "Ctrl+Q"):
             assert shortcut in status
 
         await app._open_project_file(python_path)
@@ -846,6 +1008,33 @@ async def test_last_tab_closes_to_welcome_and_files_can_be_reopened(tmp_path):
         assert app.active_tab_index == 0
         assert app._active_path == python_path.resolve()
         assert app.query_one("#tabs", TabBar).tab_count == 1
+
+
+@pytest.mark.asyncio
+async def test_help_opens_packaged_markdown_in_a_read_only_tab(tmp_path):
+    notebook_path = tmp_path / "notes.ipynb"
+    save_notebook(new_notebook(notebook_path))
+    app = NotebookApp(new_notebook(notebook_path), workspace_root=tmp_path)
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await app._dispatch_command("help")
+        await pilot.pause()
+
+        assert app._active_tab.path.name == "HELP.md"
+        assert app._active_tab.read_only
+        assert app.text_buffer is not None
+        assert "# NotebookCLI Guide" in app.text_buffer.text
+        assert ":folder open path" in app.text_buffer.text
+        assert ":ai provider ollama" in app.text_buffer.text
+        assert app.text_editor is not None
+        assert app.text_editor.read_only
+        assert not app.text_editor.editable
+
+        tab_count = len(app.tabs)
+        await pilot.press("i")
+        assert app.text_editor.vim_mode == "normal"
+        await app._dispatch_command("help")
+        assert len(app.tabs) == tab_count
 
 
 @pytest.mark.asyncio
@@ -938,7 +1127,7 @@ async def test_terminal_safe_file_tab_shortcuts(tmp_path):
 
     async with app.run_test(size=(110, 32)) as pilot:
         tree = app.query_one("#files")
-        await pilot.press("ctrl+b")
+        await pilot.press("ctrl+e")
         python_node = next(node for node in tree.root.children if node.data == python_path.resolve())
         tree.move_cursor(python_node)
         await pilot.press("t")
@@ -952,7 +1141,7 @@ async def test_terminal_safe_file_tab_shortcuts(tmp_path):
         await app.workers.wait_for_complete()
         assert app._active_path == python_path.resolve()
 
-        await pilot.press("ctrl+b")
+        await pilot.press("ctrl+e")
         markdown_node = next(
             node for node in tree.root.children if node.data == markdown_path.resolve()
         )
@@ -1128,7 +1317,7 @@ async def test_databricks_connect_configures_notebook_kernel(tmp_path, monkeypat
         host="https://example.cloud.databricks.com",
         user_name="user@example.com",
     )
-    monkeypatch.setattr("nbcli.tui.connect_databricks", lambda profile: connection)
+    monkeypatch.setattr("notebookcli.tui.connect_databricks", lambda profile: connection)
 
     async with app.run_test(size=(110, 34)) as pilot:
         await submit_command(app, pilot, "databricks connect MyProfile")

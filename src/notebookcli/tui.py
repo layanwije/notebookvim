@@ -6,6 +6,7 @@ import json
 import shlex
 import uuid
 from dataclasses import dataclass, field
+from importlib.resources import files
 from pathlib import Path
 from typing import Optional
 
@@ -20,6 +21,8 @@ from textual.suggester import Suggester, SuggestFromList
 from textual.widgets import Footer, Header, Input, OptionList, Static, Tab, Tabs, TextArea, Tree
 
 from .commands import COMMANDS, COMMAND_SUGGESTIONS, normalize_command
+from .ai import provider_statuses
+from .ai_pane import AIInput, AIPane
 from .completion import python_completions
 from .databricks import (
     DatabricksConnection,
@@ -32,9 +35,10 @@ from .kernel import ExecutionUpdate, Kernel
 from .lakehouse import InspectionError, InspectionReport, LakehouseInspector, find_delta_root
 from .git import GitError, GitProfile, GitService
 from .model import Cell, CellType, Notebook
-from .preferences import load_theme, save_theme
+from .preferences import DEFAULT_THEME, load_ai_model, load_ai_provider, load_theme, save_ai_provider, save_theme
 from .rendering import render_cell
 from .remote import DatabricksRemote, RemoteError, RemoteReport, SyncStatus
+from .scaffolds import init_data_engineering_scaffold
 from .storage import load_notebook, new_notebook, save_notebook, to_node
 from .terminal import TerminalInput, TerminalPane
 from .themes import (
@@ -54,6 +58,7 @@ from .workspace import (
     load_parquet_preview,
     load_text_buffer,
     notebook_files,
+    project_directories,
     project_files,
     save_text_buffer,
 )
@@ -81,7 +86,11 @@ class EmptyWorkspace(Static, can_focus=True):
             "[bold]Notebook CLI[/bold]\n"
             "Vim-like experience for the World of Data\n\n"
             "Press [bold]Esc[/bold], then [bold]:[/bold] for commands\n"
-            "Use [bold]:help[/bold] for the command reference",
+            "Use [bold]:help[/bold] for the command reference\n\n"
+            "Open a folder:        [bold]:folder open path[/bold]\n"
+            "Open the terminal:    [bold]:terminal[/bold]\n"
+            "Open the AI terminal: [bold]:ai[/bold]\n"
+            "Focus file explorer:  [bold]Ctrl+E[/bold]",
             id="empty-workspace",
         )
 
@@ -251,6 +260,39 @@ class InspectionModal(ModalScreen[None]):
         self.dismiss()
 
 
+class NewFileModal(ModalScreen[Optional[str]]):
+    CSS = """
+    NewFileModal { align: center middle; background: rgba(0, 0, 0, 0.65); }
+    #new-file-modal {
+        width: 64; height: auto; padding: 1 2;
+        background: $surface; border: round $accent;
+    }
+    #new-file-folder { margin-bottom: 1; color: $text-muted; }
+    """
+    BINDINGS = [Binding("escape", "cancel", "Cancel", priority=True)]
+
+    def __init__(self, folder: Path, workspace_root: Path) -> None:
+        super().__init__()
+        self.folder = folder
+        self.workspace_root = workspace_root
+
+    def compose(self) -> ComposeResult:
+        relative_folder = self.folder.relative_to(self.workspace_root)
+        location = str(relative_folder) if relative_folder.parts else "."
+        with Vertical(id="new-file-modal"):
+            yield Static(f"Create a new file in {location}", id="new-file-folder")
+            yield Input(placeholder="Filename", id="new-file-name")
+
+    def on_mount(self) -> None:
+        self.query_one("#new-file-name", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self.dismiss(event.value.strip() or None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 @dataclass
 class DocumentTab:
     path: Path
@@ -262,6 +304,7 @@ class DocumentTab:
     remote_report: Optional[RemoteReport] = None
     inspection_report: Optional[InspectionReport] = None
     kernel: Optional[Kernel] = None
+    read_only: bool = False
     selected: int = 0
     collapsed_outputs: set[str] = field(default_factory=set)
     notebook_undo: list[tuple[list[Cell], int]] = field(default_factory=list)
@@ -313,8 +356,9 @@ class TextFileEditor(TextArea):
         Binding("tab", "complete_or_indent", "Complete", priority=True),
     ]
 
-    def __init__(self, *args, **kwargs) -> None:
+    def __init__(self, *args, editable: bool = True, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+        self.editable = editable
         self.vim_mode = "normal"
         self._vim_pending = ""
         self.read_only = True
@@ -347,6 +391,8 @@ class TextFileEditor(TextArea):
         self.move_cursor((last_row, len(self.document[last_row])), select=select)
 
     def enter_insert_mode(self, placement: str = "i") -> None:
+        if not self.editable:
+            return
         self.read_only = False
         if placement == "a":
             self.action_cursor_right()
@@ -432,6 +478,13 @@ class TextFileEditor(TextArea):
         if self.vim_mode == "insert":
             return
         key = event.key
+        if not self.editable and key in {
+            "i", "a", "shift+i", "shift+a", "o", "shift+o",
+            "d", "x", "p", "shift+p", "u", "ctrl+r",
+        }:
+            event.stop()
+            event.prevent_default()
+            return
         if key == "q" and self.app._escape_close_armed:  # type: ignore[attr-defined]
             event.stop()
             event.prevent_default()
@@ -443,7 +496,7 @@ class TextFileEditor(TextArea):
         if key in {"left", "right", "up", "down", "pageup", "pagedown"}:
             return
         if key in {
-            "colon", "ctrl+s", "ctrl+p", "ctrl+b", "ctrl+tab", "ctrl+shift+tab",
+            "colon", "ctrl+s", "ctrl+p", "ctrl+e", "ctrl+tab", "ctrl+shift+tab",
             "shift+tab", "ctrl+w", "ctrl+q", "left_square_bracket",
             "right_square_bracket",
         }:
@@ -695,6 +748,18 @@ class ProjectTree(Tree[Path]):
         else:
             self.action_select_cursor()
 
+    async def _on_mouse_down(self, event: events.MouseDown) -> None:
+        if event.button == 3 and "line" in event.style.meta:
+            node = self.get_node_at_line(event.style.meta["line"])
+            if node is not None and node.data is not None:
+                self.move_cursor(node)
+                path = Path(node.data)
+                folder = path if path.is_dir() else path.parent
+                self.app.prompt_new_file(folder)  # type: ignore[attr-defined]
+                event.stop()
+                return
+        await super()._on_mouse_down(event)
+
 
 class TabBar(Tabs):
     async def _on_tab_clicked(self, event: Tab.Clicked) -> None:
@@ -746,6 +811,19 @@ class NotebookApp(App[None]):
     #terminal-input {
         height: 3; border: tall $surface-lighten-2; padding: 0 1;
         background: $terminal-background; color: $terminal-foreground;
+    }
+    #ai-pane {
+        width: 45%; min-width: 32; height: 100%; min-height: 8;
+        border-left: solid $surface-lighten-2; background: $surface-darken-1;
+    }
+    #ai-header { height: 3; padding: 1; background: $panel; color: $text-muted; }
+    #ai-output { height: 1fr; padding: 1 2; }
+    #ai-input { height: 3; border: tall $accent; padding: 0 1; }
+    #document-column.ai-below { layout: vertical; }
+    #document-column.ai-below #notebook { width: 100%; height: 1fr; }
+    #document-column.ai-below #ai-pane {
+        width: 100%; min-width: 0; height: 42%;
+        border-left: none; border-top: solid $surface-lighten-2;
     }
     #inspection-pane {
         width: 45%; min-width: 32; height: 100%; padding: 1;
@@ -808,7 +886,7 @@ class NotebookApp(App[None]):
         ("colon", "command", "Command"),
         ("ctrl+s", "save", "Save"),
         ("ctrl+c", "interrupt", "Interrupt"),
-        Binding("ctrl+b", "toggle_files", "Files", priority=True),
+        Binding("ctrl+e", "toggle_files", "Files", priority=True),
         Binding("ctrl+p", "find_file", "Find", priority=True),
         Binding("ctrl+tab", "toggle_file_focus", "Files/editor", priority=True),
         Binding("shift+tab", "next_tab", "Next tab", priority=True),
@@ -824,12 +902,13 @@ class NotebookApp(App[None]):
         notebook: Notebook,
         workspace_root: Optional[Path] = None,
         initial_path: Optional[Path] = None,
+        project_open: bool = True,
     ) -> None:
         super().__init__()
         for app_theme in APP_THEMES.values():
             self.register_theme(app_theme)
         saved_theme = load_theme()
-        self._nbcli_theme = saved_theme if saved_theme in THEME_NAMES else "default"
+        self._nbcli_theme = saved_theme if saved_theme in THEME_NAMES else DEFAULT_THEME
         self.syntax_theme = RICH_SYNTAX_THEMES[self._nbcli_theme]
         self.theme = self._nbcli_theme
         terminal_theme = TERMINAL_THEMES[self._nbcli_theme]
@@ -837,8 +916,9 @@ class NotebookApp(App[None]):
         self.ansi_theme_light = terminal_theme
         self.notebook = notebook
         self.workspace_root = Path(workspace_root or notebook.path.parent).resolve()
+        self.project_open = project_open
         self.initial_path = Path(initial_path).resolve() if initial_path is not None else None
-        self.project_paths = project_files(self.workspace_root)
+        self.project_paths = project_files(self.workspace_root) if project_open else []
         self.selected = 0
         self.editor: Optional[CellEditor] = None
         self.text_buffer: Optional[TextBuffer] = None
@@ -854,20 +934,26 @@ class NotebookApp(App[None]):
         self._completions: list[str] = []
         self._command_option_values: list[str] = []
         self.kernel = Kernel(notebook.kernel_name)
-        self.tabs = [
+        self.tabs = ([
             DocumentTab(
                 path=notebook.path.resolve(),
                 notebook=notebook,
                 kernel=self.kernel,
             )
-        ]
-        self.active_tab_index = 0
+        ] if project_open else [])
+        self.active_tab_index = 0 if project_open else -1
         self._tab_activation_lock = asyncio.Lock()
         self._running_cells: set[int] = set()
         self._collapsed_outputs: set[str] = set()
         self._quit_armed = False
         self._close_armed_tab: Optional[DocumentTab] = None
         self.terminal_pane = TerminalPane(self.workspace_root, id="terminal-pane")
+        self.ai_pane = AIPane(
+            self.workspace_root,
+            provider=load_ai_provider(),
+            model=load_ai_model(),
+            id="ai-pane",
+        )
         self.inspection_pane = InspectionPane()
         self.terminal_placement = "side"
         self.databricks_connection: Optional[DatabricksConnection] = None
@@ -884,7 +970,10 @@ class NotebookApp(App[None]):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield TabBar(Tab(self.notebook.path.name, id="document-tab-0"), id="tabs")
+        yield TabBar(
+            *(Tab(tab.display_name, id=f"document-tab-{index}") for index, tab in enumerate(self.tabs)),
+            id="tabs",
+        )
         yield ProjectFileInput(
             [str(path.relative_to(self.workspace_root)) for path in self.project_paths],
             placeholder="Find project file",
@@ -894,9 +983,10 @@ class NotebookApp(App[None]):
             yield self._project_tree()
             with Vertical(id="document-column"):
                 with VerticalScroll(id="notebook"):
-                    for index in range(len(self.notebook.cells)):
+                    for index in range(len(self.notebook.cells) if self.tabs else 0):
                         yield self._new_view(index)
                 yield self.terminal_pane
+                yield self.ai_pane
                 yield self.inspection_pane
         yield Static(id="status")
         yield OptionList(id="command-suggestions", compact=True)
@@ -905,15 +995,19 @@ class NotebookApp(App[None]):
 
     def on_mount(self) -> None:
         self._update_sub_title()
-        self._select(0)
+        if self.tabs:
+            self._select(0)
         self.query_one("#command", CommandInput).display = False
         self.query_one("#command-suggestions", OptionList).display = False
         self.query_one("#file-picker", ProjectFileInput).display = False
         self.query_one("#terminal-pane", TerminalPane).display = False
+        self.query_one("#ai-pane", AIPane).display = False
         self.query_one("#inspection-pane", InspectionPane).display = False
         self.query_one("#document-column", Vertical).add_class("terminal-side")
         self._refresh_tabs()
         self._update_status("IDLE")
+        if not self.project_open:
+            self.run_worker(self._show_empty_workspace())
         if self.initial_path is not None and self.initial_path != self.notebook.path.resolve():
             self.run_worker(self._open_project_file(self.initial_path))
 
@@ -958,7 +1052,8 @@ class NotebookApp(App[None]):
         )
 
     def _project_tree(self) -> ProjectTree:
-        tree = ProjectTree(self.workspace_root.name, self.workspace_root, id="files")
+        label = self.workspace_root.name if self.project_open else "No project"
+        tree = ProjectTree(label, self.workspace_root, id="files")
         self._populate_project_tree(tree)
         return tree
 
@@ -1138,7 +1233,9 @@ class NotebookApp(App[None]):
         if tab.text_buffer is not None:
             self.text_buffer = tab.text_buffer
             self.parquet_preview = None
-            self.text_editor = await self._mount_text_editor(notebook_view, tab.text_buffer)
+            self.text_editor = await self._mount_text_editor(
+                notebook_view, tab.text_buffer, read_only=tab.read_only
+            )
             self.text_editor.focus()
         elif tab.parquet_preview is not None:
             self.text_buffer = None
@@ -1269,6 +1366,7 @@ class NotebookApp(App[None]):
         if placement not in {"side", "below"}:
             placement = "side"
         self.action_inspection_close(focus_document=False)
+        self.action_ai_close(focus_document=False)
         document = self.query_one("#document-column", Vertical)
         document.remove_class("terminal-side", "terminal-below")
         document.add_class(f"terminal-{placement}")
@@ -1286,6 +1384,58 @@ class NotebookApp(App[None]):
         self._focus_document()
         self._update_status()
 
+    def action_ai_open(self, placement: str = "side") -> None:
+        if placement not in {"side", "below"}:
+            placement = "side"
+        self.action_terminal_close()
+        self.action_inspection_close(focus_document=False)
+        document = self.query_one("#document-column", Vertical)
+        document.remove_class(
+            "terminal-side", "terminal-below", "inspection-side", "inspection-below",
+            "ai-side", "ai-below",
+        )
+        document.add_class(f"ai-{placement}")
+        pane = self.query_one("#ai-pane", AIPane)
+        pane.display = True
+        pane.query_one("#ai-input", AIInput).focus()
+        self.query_one("#status", Static).update(
+            f" AI {placement.upper()} · {pane.provider.name} │ Enter: send │ "
+            "Ctrl+C: cancel │ Escape: editor"
+        )
+
+    def action_ai_close(self, focus_document: bool = True) -> None:
+        pane = self.query_one("#ai-pane", AIPane)
+        pane.display = False
+        document = self.query_one("#document-column", Vertical)
+        document.remove_class("ai-side", "ai-below")
+        if focus_document:
+            self._focus_document()
+            self._update_status()
+
+    def focus_document_from_ai(self) -> None:
+        self._focus_document()
+        self._update_status()
+
+    def ai_context(self) -> str:
+        """Return a bounded snapshot of the active document for an AI prompt."""
+        if not self.tabs:
+            return f"Workspace: {self.workspace_root}"
+        path = self._active_path
+        parts = [f"Workspace: {self.workspace_root}", f"Active file: {path}"]
+        if self._notebook_active and self.notebook.cells:
+            cell = self.notebook.cells[self.selected]
+            source = self.editor.text if self.editor is not None else cell.source
+            parts.extend(
+                [f"Selected cell: {self.selected + 1} ({cell.cell_type.value})", source[:12_000]]
+            )
+        elif self.text_buffer is not None:
+            text = self.text_editor.text if self.text_editor is not None else self.text_buffer.text
+            parts.append(text[:12_000])
+        elif self.sql_document is not None:
+            query = self.sql_editor.text if self.sql_editor is not None else self.sql_document.query
+            parts.append(query[:12_000])
+        return "\n".join(parts)
+
     def action_inspection_close(self, focus_document: bool = True) -> None:
         pane = self.query_one("#inspection-pane", InspectionPane)
         pane.display = False
@@ -1297,6 +1447,7 @@ class NotebookApp(App[None]):
 
     def _open_inspection_pane(self, report: InspectionReport, placement: str) -> None:
         self.action_terminal_close()
+        self.action_ai_close(focus_document=False)
         document = self.query_one("#document-column", Vertical)
         document.remove_class("terminal-side", "terminal-below", "inspection-side", "inspection-below")
         document.add_class(f"inspection-{placement}")
@@ -1364,10 +1515,15 @@ class NotebookApp(App[None]):
             self.query_one("#status", Static).update(self._shortcut_status("READY"))
             return
         if self.text_buffer is not None:
+            dirty = " ●" if self.text_buffer.dirty else ""
             mode = (
                 self.text_editor.vim_mode.upper()
                 if isinstance(self.text_editor, TextFileEditor)
                 else "NORMAL"
+            )
+            self.query_one("#status", Static).update(
+                f" {mode} TEXT │ Ctrl+S: save │ Ctrl+P: find │ "
+                f"{self.text_buffer.path.name}{dirty}"
             )
             self.query_one("#status", Static).update(self._shortcut_status(f"{mode} TEXT"))
             return
@@ -1395,7 +1551,7 @@ class NotebookApp(App[None]):
     @staticmethod
     def _shortcut_status(mode: str) -> str:
         return (
-            f" {mode} │ : cmd │ :help │ Ctrl+B files │ i edit │ "
+            f" {mode} │ : cmd │ :help │ Ctrl+E files │ i edit │ "
             "Ctrl+S save │ Ctrl+Q exit"
         )
 
@@ -1414,6 +1570,9 @@ class NotebookApp(App[None]):
 
     def action_find_file(self) -> None:
         if self.editor is not None:
+            return
+        if not self.project_open:
+            self.notify("Open a project first with :project open path", severity="warning")
             return
         picker = self.query_one("#file-picker", ProjectFileInput)
         picker.value = ""
@@ -1442,6 +1601,9 @@ class NotebookApp(App[None]):
         self.run_worker(self._open_project_file(path, new_tab=True))
 
     async def _open_file_from_command(self, relative_path: str, new_tab: bool = False) -> None:
+        if not self.project_open:
+            self.notify("Open a project first with :project open path", severity="warning")
+            return
         relative_path = relative_path.strip()
         if (
             len(relative_path) >= 2
@@ -1459,6 +1621,149 @@ class NotebookApp(App[None]):
             self.notify(f"File not found: {relative_path}", severity="warning")
             return
         await self._open_project_file(path, new_tab=new_tab)
+
+    def prompt_new_file(self, folder: Path) -> None:
+        if not self.project_open:
+            self.notify("Open a project first with :project open path", severity="warning")
+            return
+
+        def create_from_name(name: Optional[str]) -> None:
+            if name:
+                relative_folder = folder.resolve().relative_to(self.workspace_root)
+                self._create_project_file(str(relative_folder / name))
+
+        self.push_screen(NewFileModal(folder.resolve(), self.workspace_root), create_from_name)
+
+    def _create_project_file(self, relative_path: str) -> Optional[Path]:
+        if not self.project_open:
+            self.notify("Open a project first with :project open path", severity="warning")
+            return None
+        relative_path = relative_path.strip()
+        if (
+            len(relative_path) >= 2
+            and relative_path[0] == relative_path[-1]
+            and relative_path[0] in {"'", '"'}
+        ):
+            relative_path = relative_path[1:-1]
+        if not relative_path:
+            self.notify("Provide a filename", severity="warning")
+            return None
+        path = (self.workspace_root / relative_path).resolve()
+        try:
+            path.relative_to(self.workspace_root)
+        except ValueError:
+            self.notify("Use a path inside the current project", severity="warning")
+            return None
+        if not path.parent.is_dir():
+            self.notify(f"Folder not found: {path.parent}", severity="warning")
+            return None
+        if path.exists():
+            self.notify(f"File already exists: {relative_path}", severity="warning")
+            return None
+        try:
+            path.touch(exist_ok=False)
+        except OSError as exc:
+            self.notify(f"Could not create file: {exc}", severity="error")
+            return None
+        self._refresh_project_files()
+        self.notify(f"Created {path.relative_to(self.workspace_root)}")
+        return path
+
+    async def _open_project_from_command(self, folder: str) -> None:
+        folder = folder.strip()
+        if (
+            len(folder) >= 2
+            and folder[0] == folder[-1]
+            and folder[0] in {"'", '"'}
+        ):
+            folder = folder[1:-1]
+        candidate = Path(folder).expanduser()
+        target = (
+            candidate.resolve()
+            if candidate.is_absolute()
+            else (self.workspace_root / candidate).resolve()
+        )
+        if not target.is_dir():
+            self.notify(f"Folder not found: {folder}", severity="warning")
+            return
+        if self.project_open and target == self.workspace_root:
+            self.notify("That project is already open")
+            return
+        if self._running_cells:
+            self.notify("Wait for execution to finish before switching projects", severity="warning")
+            return
+        if self.editor is not None:
+            await self._finish_edit()
+        self._sync_active_tab()
+        if any(tab.dirty for tab in self.tabs):
+            self.notify(
+                "Save or close unsaved files before switching projects",
+                severity="warning",
+            )
+            return
+        await self._shutdown_all_kernels()
+        if self.data_workspace is not None:
+            self.data_workspace.close()
+            self.data_workspace = None
+        self.tabs.clear()
+        self.active_tab_index = -1
+        self.workspace_root = target
+        self.project_open = True
+        self.project_paths = project_files(target)
+        self.git = GitService(target)
+        self.remote = None
+        self._sql_document_count = 0
+        self.terminal_pane.set_workspace(target)
+        self.ai_pane.workspace_root = target
+        tree = self.query_one("#files", ProjectTree)
+        tree.reset(target.name, target)
+        self._populate_project_tree(tree)
+        tree.root.expand()
+        tree.refresh(layout=True)
+        picker = self.query_one("#file-picker", ProjectFileInput)
+        picker.suggester = FuzzyFileSuggester(
+            [str(path.relative_to(target)) for path in self.project_paths]
+        )
+        picker._suggestion = None
+        await self.query_one("#tabs", TabBar).clear()
+        await self._show_empty_workspace()
+        self.notify(f"Opened project: {target}", title="Project")
+
+    async def _close_project(self) -> None:
+        if not self.project_open:
+            self.notify("No project is open")
+            return
+        if self._running_cells:
+            self.notify("Wait for execution to finish before closing the project", severity="warning")
+            return
+        if self.editor is not None:
+            await self._finish_edit()
+        self._sync_active_tab()
+        if any(tab.dirty for tab in self.tabs):
+            self.notify(
+                "Save or close unsaved files before closing the project",
+                severity="warning",
+            )
+            return
+        await self._shutdown_all_kernels()
+        if self.data_workspace is not None:
+            self.data_workspace.close()
+            self.data_workspace = None
+        self.tabs.clear()
+        self.active_tab_index = -1
+        self.project_paths = []
+        self.project_open = False
+        self.remote = None
+        self._sql_document_count = 0
+        tree = self.query_one("#files", ProjectTree)
+        tree.reset("No project", self.workspace_root)
+        tree.refresh(layout=True)
+        picker = self.query_one("#file-picker", ProjectFileInput)
+        picker.suggester = FuzzyFileSuggester([])
+        picker._suggestion = None
+        await self.query_one("#tabs", TabBar).clear()
+        await self._show_empty_workspace()
+        self.notify("Project closed", title="Project")
 
     async def _open_project_file(self, path: Path, new_tab: bool = False) -> None:
         path = path.resolve()
@@ -1527,17 +1832,39 @@ class NotebookApp(App[None]):
         self.notify(f"Opened {path.relative_to(self.workspace_root)}")
 
     async def _mount_text_editor(
-        self, notebook_view: VerticalScroll, buffer: TextBuffer
+        self, notebook_view: VerticalScroll, buffer: TextBuffer, read_only: bool = False
     ) -> TextArea:
         editor = TextFileEditor.code_editor(
             buffer.text,
             language=buffer.language,
             id="text-file-editor",
         )
+        editor.editable = not read_only
         self._configure_editor_theme(editor)
         editor.add_class("text-file-editor")
         await notebook_view.mount(editor)
         return editor
+
+    async def _open_help(self) -> None:
+        existing = next(
+            (
+                index
+                for index, tab in enumerate(self.tabs)
+                if tab.read_only and tab.path.name == "HELP.md"
+            ),
+            None,
+        )
+        if existing is not None:
+            await self._activate_tab(existing)
+            return
+        help_text = files("notebookcli").joinpath("HELP.md").read_text(encoding="utf-8")
+        await self._append_tab(
+            DocumentTab(
+                path=Path("HELP.md"),
+                text_buffer=TextBuffer(path=Path("HELP.md"), text=help_text),
+                read_only=True,
+            )
+        )
 
     def _duckdb(self) -> DuckDBWorkspace:
         if self.data_workspace is None:
@@ -2430,6 +2757,7 @@ class NotebookApp(App[None]):
             if self.editor.vim_mode == "insert":
                 return
             self.run_worker(self._finish_edit_then_command())
+        if self.editor is not None or text_in_insert:
             return
         self._show_command()
 
@@ -2458,6 +2786,11 @@ class NotebookApp(App[None]):
     def _command_option_candidates(self, value: str) -> list[str]:
         typed = value.strip().lstrip(":")
         folded = typed.casefold()
+        for operation in ("folder open", "project open"):
+            if folded == operation or folded.startswith(f"{operation} "):
+                # Folder paths may start from very large directories (including
+                # the user's home), so never crawl the filesystem for options.
+                return []
         for operation in ("file open", "tab open"):
             if folded == operation or folded.startswith(f"{operation} "):
                 partial = typed[len(operation):].strip().casefold()
@@ -2602,10 +2935,37 @@ class NotebookApp(App[None]):
             self.action_restart_kernel()
         elif command == "kernel shutdown":
             self.action_shutdown_kernel()
+        elif command.startswith("folder open "):
+            await self._open_project_from_command(command.removeprefix("folder open "))
+        elif command.startswith("project open "):
+            await self._open_project_from_command(command.removeprefix("project open "))
+        elif command == "project scaffold init data-engineering":
+            if not self.project_open:
+                self.notify("Open a project before initializing a scaffold", severity="warning")
+                return
+            try:
+                result = init_data_engineering_scaffold(self.workspace_root)
+            except OSError as exc:
+                self.notify(f"Could not initialize scaffold: {exc}", severity="error")
+                return
+            self._refresh_project_files()
+            message = f"Created {len(result.created)} files"
+            if result.skipped:
+                message += f"; kept {len(result.skipped)} existing files"
+            self.notify(message, title="Data engineering scaffold")
+        elif command in {"folder close", "project close"}:
+            await self._close_project()
+        elif command in {"folder open", "project open"}:
+            self.notify("Use :project open relative/path/to/folder", severity="warning")
         elif command.startswith("file open "):
             await self._open_file_from_command(command.removeprefix("file open "))
         elif command == "file open":
             self.notify("Use :file open relative/path/to/file", severity="warning")
+        elif command.startswith(("file new ", "file create ")):
+            operation = "file new " if command.startswith("file new ") else "file create "
+            self._create_project_file(command.removeprefix(operation))
+        elif command in {"file new", "file create"}:
+            self.notify("Use :file new relative/path/to/file", severity="warning")
         elif command.startswith("tab open "):
             await self._open_file_from_command(
                 command.removeprefix("tab open "), new_tab=True
@@ -2626,6 +2986,52 @@ class NotebookApp(App[None]):
             self.action_terminal_open("below")
         elif command == "terminal close":
             self.action_terminal_close()
+        elif command in {"ai", "ai open", "ai open side"}:
+            self.action_ai_open("side")
+        elif command == "ai open below":
+            self.action_ai_open("below")
+        elif command == "ai close":
+            self.action_ai_close()
+        elif command == "ai interrupt":
+            if self.ai_pane.cancel():
+                self.notify("Interrupt requested", title="AI")
+            else:
+                self.notify("No AI request is running", title="AI")
+        elif command == "ai status":
+            states = provider_statuses()
+            self.notify(
+                "\n".join(
+                    f"{name}: {'available' if available else 'not installed'}"
+                    for name, available in states.items()
+                ),
+                title="AI providers",
+            )
+        elif command.startswith("ai provider "):
+            arguments = command.removeprefix("ai provider ").split(maxsplit=1)
+            provider = arguments[0]
+            model = arguments[1] if len(arguments) == 2 else None
+            if model and provider != "ollama":
+                self.notify(
+                    "A model can currently be specified only for Ollama",
+                    title="AI provider",
+                    severity="warning",
+                )
+                return
+            try:
+                self.ai_pane.set_provider(provider, model=model)
+                selected_model = getattr(self.ai_pane.provider, "model", None)
+                save_ai_provider(provider, selected_model)
+            except (ValueError, OSError) as exc:
+                self.notify(str(exc), title="AI provider", severity="error")
+            else:
+                self.action_ai_open("side")
+        elif command.startswith("ai ask "):
+            prompt = command.removeprefix("ai ask ").strip()
+            self.action_ai_open("side")
+            if prompt:
+                self.ai_pane.ask(prompt)
+        elif command == "ai ask":
+            self.action_ai_open("side")
         elif command == "sql":
             await self._open_sql_workspace()
         elif command == "sql new":
@@ -2684,7 +3090,7 @@ class NotebookApp(App[None]):
         elif command.startswith("git "):
             await self._dispatch_git_command(command)
         elif command == "help":
-            self.notify("\n".join(f":{item}" for item in COMMANDS), title="Commands", timeout=15)
+            await self._open_help()
         elif command == "exit":
             await self.action_request_quit()
         elif command == "write close":
@@ -2870,6 +3276,9 @@ class NotebookApp(App[None]):
             self.notify("Inspection reports are read-only")
             return True
         if self.text_buffer is not None:
+            if self._active_tab.read_only:
+                self.notify("Help is read-only")
+                return True
             if self.text_editor is not None:
                 self.text_buffer.text = self.text_editor.text
             try:
@@ -2942,6 +3351,7 @@ class NotebookApp(App[None]):
 
     async def on_unmount(self) -> None:
         await self.terminal_pane.shutdown()
+        await self.ai_pane.shutdown()
         await self._shutdown_all_kernels()
         if self.data_workspace is not None:
             self.data_workspace.close()
@@ -2956,8 +3366,14 @@ def run_tui(
     notebook: Notebook,
     workspace_root: Optional[Path] = None,
     initial_path: Optional[Path] = None,
+    project_open: bool = True,
 ) -> None:
-    NotebookApp(notebook, workspace_root=workspace_root, initial_path=initial_path).run()
+    NotebookApp(
+        notebook,
+        workspace_root=workspace_root,
+        initial_path=initial_path,
+        project_open=project_open,
+    ).run()
 
 
 def run_workspace(root: Path, initial_path: Optional[Path] = None) -> None:
@@ -2965,3 +3381,8 @@ def run_workspace(root: Path, initial_path: Optional[Path] = None) -> None:
     notebooks = notebook_files(root)
     notebook = load_notebook(notebooks[0]) if notebooks else new_notebook(root / "untitled.ipynb")
     run_tui(notebook, workspace_root=root, initial_path=initial_path)
+
+
+def run_empty_workspace(root: Optional[Path] = None) -> None:
+    root = Path(root or Path.cwd()).resolve()
+    run_tui(new_notebook(root / "untitled.ipynb"), workspace_root=root, project_open=False)

@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from nbcli.completion import python_completions
+from notebookcli.completion import python_completions
 
 
 def test_python_completions_are_local_and_include_standard_library_names():
