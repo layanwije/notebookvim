@@ -10,6 +10,9 @@ Claude, or Ollama, and connectivity for data platforms such as Databricks, with
 a provider-neutral foundation designed to support platforms such as Microsoft
 Fabric.
 
+I hope you enjoy this programmer-focused CLI for the world of data—and that it
+makes working with data feel a little more at home in the terminal.
+
 ## Install
 
 Install the published package with pip:
