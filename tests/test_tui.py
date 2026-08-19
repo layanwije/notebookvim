@@ -29,16 +29,62 @@ async def test_navigation_and_editing():
         assert app.selected == 0
         await pilot.press("j")
         assert app.selected == 1
-        await pilot.press("k", "enter")
+        await pilot.press("k", "i")
         assert app.editor is not None
         assert app.editor.language == "python"
         assert app.editor.theme == "monokai"
         app.editor.text = "value = 2"
-        await pilot.press("escape")
+        await pilot.press("escape", "escape")
         await pilot.pause()
         assert app.editor is None
         assert notebook.cells[0].source == "value = 2"
         assert notebook.dirty
+
+
+@pytest.mark.asyncio
+async def test_notebook_vim_normal_mode_cell_operations():
+    notebook = Notebook(
+        path=Path("example.ipynb"),
+        cells=[
+            Cell(CellType.CODE, "first", cell_id="cell0001"),
+            Cell(CellType.CODE, "second", cell_id="cell0002"),
+        ],
+    )
+    app = NotebookApp(notebook)
+
+    async with app.run_test(size=(100, 32)) as pilot:
+        await pilot.press("enter")
+        assert app.editor is not None
+        assert app.editor.vim_mode == "normal"
+        assert app.editor.read_only
+
+        await pilot.press("i")
+        assert app.editor.vim_mode == "insert"
+        await pilot.press("escape")
+        assert app.editor is not None
+        assert app.editor.vim_mode == "normal"
+        await pilot.press("escape")
+        assert app.editor is None
+
+        await pilot.press("y", "y", "p")
+        await pilot.pause()
+        assert [cell.source for cell in notebook.cells] == ["first", "first", "second"]
+
+        await pilot.press("d", "d")
+        await pilot.pause()
+        assert [cell.source for cell in notebook.cells] == ["first", "second"]
+
+        await pilot.press("u")
+        await pilot.pause()
+        assert [cell.source for cell in notebook.cells] == ["first", "first", "second"]
+
+        await pilot.press("ctrl+r", "shift+g")
+        await pilot.pause()
+        assert [cell.source for cell in notebook.cells] == ["first", "second"]
+        assert app.selected == 1
+
+        await pilot.press("g", "g")
+        assert app.selected == 0
 
 
 @pytest.mark.asyncio
@@ -160,14 +206,14 @@ async def test_add_cell_above_and_below():
     app = NotebookApp(notebook)
 
     async with app.run_test(size=(100, 32)) as pilot:
-        await pilot.press("a")
+        await pilot.press("o")
         await pilot.pause()
         assert len(notebook.cells) == 2
         assert app.selected == 1
         assert notebook.cells[0] is original
         assert notebook.cells[1].source == ""
 
-        await pilot.press("shift+a")
+        await pilot.press("escape", "escape", "shift+o")
         await pilot.pause()
         assert len(notebook.cells) == 3
         assert app.selected == 1
@@ -228,10 +274,10 @@ async def test_toggle_code_cell_to_rendered_markdown_and_back():
         assert cell.outputs == []
         assert notebook.dirty
 
-        await pilot.press("enter")
+        await pilot.press("i")
         assert app.editor is not None
         assert app.editor.language is None
-        await pilot.press("escape")
+        await pilot.press("escape", "escape")
 
         await pilot.press("m")
         await pilot.pause()
@@ -239,24 +285,30 @@ async def test_toggle_code_cell_to_rendered_markdown_and_back():
 
 
 @pytest.mark.asyncio
-async def test_mac_style_editor_cursor_shortcuts():
+async def test_platform_style_editor_cursor_shortcuts():
     cell = Cell(CellType.CODE, "alpha beta\ngamma", cell_id="cell0001")
     notebook = Notebook(path=Path("example.ipynb"), cells=[cell])
     app = NotebookApp(notebook)
 
     async with app.run_test(size=(100, 32)) as pilot:
-        await pilot.press("enter")
+        await pilot.press("i")
         assert app.editor is not None
 
         app.editor.move_cursor((0, 3))
-        await pilot.press("ctrl+right")
+        await pilot.press("super+right")
         assert app.editor.cursor_location == (0, 10)
 
-        await pilot.press("ctrl+left")
+        await pilot.press("super+left")
         assert app.editor.cursor_location == (0, 0)
 
-        await pilot.press("alt+right")
+        await pilot.press("ctrl+right")
         assert 0 < app.editor.cursor_location[1] < 10
+
+        await pilot.press("ctrl+down")
+        assert app.editor.cursor_location == (1, 5)
+
+        await pilot.press("super+up")
+        assert app.editor.cursor_location == (0, 0)
 
 
 @pytest.mark.asyncio
@@ -268,7 +320,7 @@ async def test_python_cell_offers_and_accepts_local_completion():
     app = NotebookApp(notebook)
 
     async with app.run_test(size=(100, 32)) as pilot:
-        await pilot.press("enter", "p", "r", "i")
+        await pilot.press("i", "p", "r", "i")
         await app.workers.wait_for_complete()
         await asyncio.sleep(0.05)
         await pilot.pause()
@@ -473,7 +525,9 @@ async def test_python_text_file_has_intellisense_and_undo(tmp_path):
     async with app.run_test(size=(100, 30)) as pilot:
         await app._open_project_file(python_path)
         assert app.text_editor is not None
-        await pilot.press("p", "r", "i")
+        assert app.text_editor.vim_mode == "normal"
+        assert app.text_editor.read_only
+        await pilot.press("i", "p", "r", "i")
         await app.workers.wait_for_complete()
         await asyncio.sleep(0.05)
         await pilot.pause()
@@ -483,6 +537,35 @@ async def test_python_text_file_has_intellisense_and_undo(tmp_path):
         assert app.text_editor.text == "print"
         await pilot.press("ctrl+z")
         assert app.text_editor.text == "pri"
+
+
+@pytest.mark.asyncio
+async def test_text_file_vim_modes_and_line_operations(tmp_path):
+    notebook_path = tmp_path / "notes.ipynb"
+    python_path = tmp_path / "helpers.py"
+    save_notebook(new_notebook(notebook_path))
+    python_path.write_text("one\ntwo\n", encoding="utf-8")
+    app = NotebookApp(new_notebook(notebook_path), workspace_root=tmp_path)
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await app._open_project_file(python_path)
+        editor = app.text_editor
+        assert editor is not None
+        assert editor.vim_mode == "normal"
+        assert editor.read_only
+
+        await pilot.press("c")
+        assert editor.text == "one\ntwo\n"
+
+        await pilot.press("i", "z", "escape")
+        assert editor.text == "zone\ntwo\n"
+        assert editor.vim_mode == "normal"
+        assert editor.read_only
+
+        await pilot.press("d", "d")
+        assert editor.text == "two\n"
+        await pilot.press("u")
+        assert editor.text == "zone\ntwo\n"
 
 
 @pytest.mark.asyncio
@@ -501,7 +584,7 @@ async def test_markdown_text_file_uses_markdown_highlighting(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_text_file_escape_exposes_colon_commands_and_enter_resumes_editing(tmp_path):
+async def test_text_file_escape_exposes_commands_and_i_resumes_editing(tmp_path):
     notebook_path = tmp_path / "notes.ipynb"
     python_path = tmp_path / "helpers.py"
     save_notebook(new_notebook(notebook_path))
@@ -523,8 +606,10 @@ async def test_text_file_escape_exposes_colon_commands_and_enter_resumes_editing
         assert python_path.read_text(encoding="utf-8") == "answer = 42\n"
 
         await pilot.press("escape")
-        await pilot.press("enter")
+        await pilot.press("i")
         assert app.text_editor.has_focus
+        assert app.text_editor.vim_mode == "insert"
+        assert not app.text_editor.read_only
 
 
 @pytest.mark.asyncio
@@ -634,6 +719,45 @@ async def test_tab_close_requires_confirmation_for_unsaved_changes(tmp_path):
         await app._close_active_tab()
         assert len(app.tabs) == 1
         assert app._active_path == notebook_path.resolve()
+
+
+@pytest.mark.asyncio
+async def test_q_command_and_escape_q_close_active_tab(tmp_path):
+    notebook_path = tmp_path / "notes.ipynb"
+    first = tmp_path / "first.py"
+    second = tmp_path / "second.py"
+    save_notebook(new_notebook(notebook_path))
+    first.write_text("first = 1\n", encoding="utf-8")
+    second.write_text("second = 2\n", encoding="utf-8")
+    app = NotebookApp(new_notebook(notebook_path), workspace_root=tmp_path)
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await app._open_project_file(first, new_tab=True)
+        await submit_command(app, pilot, "q")
+        assert app._active_path == notebook_path.resolve()
+
+        await app._open_project_file(second, new_tab=True)
+        await pilot.press("escape", "q")
+        await app.workers.wait_for_complete()
+        assert app._active_path == notebook_path.resolve()
+
+
+@pytest.mark.asyncio
+async def test_exit_command_requests_program_exit():
+    notebook = Notebook(
+        path=Path("example.ipynb"),
+        cells=[Cell(CellType.CODE, "", cell_id="cell0001")],
+    )
+    app = NotebookApp(notebook)
+    called = False
+
+    async def request_exit():
+        nonlocal called
+        called = True
+
+    app.action_request_quit = request_exit
+    await app._dispatch_command("exit")
+    assert called
 
 
 @pytest.mark.asyncio

@@ -138,19 +138,42 @@ Option+Enter    Open the selected browser file in a new tab (Alt+Enter in termin
 Shift+Tab       Move to the next open tab
 Ctrl+Shift+Tab  Move to the previous open tab
 Ctrl+W          Close the active tab (`:tab close` also works)
+Escape, then q  Close the active file/tab
 Ctrl+B, then t  Terminal-safe way to focus the browser and open a file in a tab
 Escape, then ]/[ Terminal-safe next / previous tab
-Ctrl+Z / Ctrl+Y Undo / redo text edits
-Escape, then :  Open commands from a text file; Enter resumes editing
+u / Ctrl+R      Undo / redo in Normal mode
+:               Open commands in Normal mode
 ```
 
 Python text files and Python notebook cells receive local Jedi completions;
 press `Tab` to accept a displayed completion. Markdown and other supported text
 files retain syntax highlighting without Python completions.
 
-Navigation mode uses `j`/`k` (or arrows), `Enter` to edit, `r` to run, `R` to
-run and advance, `Ctrl+S` to save, and `q` to quit. In edit mode, use `Escape`
-to return to navigation.
+Editable files open in Vim-style Normal mode and cannot be changed until you
+press `i`, `a`, `I`, `A`, `o`, or `O`. The status bar shows `NORMAL`, `INSERT`,
+or `VISUAL`. In a text file, Normal mode supports `h`/`j`/`k`/`l`, `w`/`b`,
+`0`/`$`, `gg`/`G`, `dd`, `yy`, `x`, `p`/`P`, `u`, `Ctrl+R`, and character-wise
+Visual mode with `v`. Press `Escape` to return to Normal mode. Python files
+keep local completions in Insert mode, and `Tab` accepts a suggestion.
+
+Platform-style cursor shortcuts work alongside Vim motions. On macOS,
+`Command+Left/Right` goes to the start/end of a line and
+`Command+Up/Down` goes to the start/end of the document. On Windows and Linux,
+`Ctrl+Left/Right` moves by word and `Ctrl+Up/Down` moves to the start/end of the
+document. Add `Shift` to extend the selection. `Option+Left/Right` also moves by
+word on macOS. Command-key delivery depends on the terminal exposing enhanced
+keyboard events; Home/End and the Vim motions remain available everywhere.
+
+Notebook cells use the same modal idea. Press `Enter` on a selected cell to
+open it in cell-Normal mode, then `i` to edit. The first `Escape` returns from
+Insert to cell-Normal mode; a second `Escape` commits the cell and returns to
+notebook navigation. Pressing `i` from notebook navigation remains a shortcut
+that opens the cell directly in Insert mode. Use `j`/`k` to select cells,
+`o`/`O` to create and edit a cell below/above, `dd` to delete, `yy` to copy,
+`p`/`P` to paste below/above, `u`/`Ctrl+R` to undo/redo, `gg`/`G` for the
+first/last cell, `J`/`K` to move a cell, `m` to switch code/Markdown, and
+`r`/`R` to run or run-and-advance. Arrow keys remain available. `Enter` does
+not enter Insert mode.
 
 Press `:` in navigation mode for commands. Selected-cell commands include:
 
@@ -169,8 +192,10 @@ code cell.
 
 Notebook and kernel commands include `:notebook run all`, `:notebook save`,
 `:kernel info`, `:kernel interrupt`, `:kernel restart`, and `:kernel shutdown`.
-Use `:help` in the application for the complete list. Short aliases such as
-`:run`, `:output clear`, `:w`, `:q`, and `:wq` are also supported.
+Use `:help` in the application for the complete list. `:q` closes the active
+file/tab, `:wq` saves and closes it, and `:exit` exits nbcli after the usual
+unsaved-work confirmation. Other short aliases include `:run`,
+`:output clear`, and `:w`.
 
 Open a workspace terminal beside the active document with `:terminal`,
 `:terminal open`, or `:terminal open side`. Use `:terminal open below` for a

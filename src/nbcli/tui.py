@@ -240,6 +240,8 @@ class DocumentTab:
     kernel: Optional[Kernel] = None
     selected: int = 0
     collapsed_outputs: set[str] = field(default_factory=set)
+    notebook_undo: list[tuple[list[Cell], int]] = field(default_factory=list)
+    notebook_redo: list[tuple[list[Cell], int]] = field(default_factory=list)
 
     @property
     def dirty(self) -> bool:
@@ -260,41 +262,242 @@ class DocumentTab:
         return self.path.name
 
 
-class CellEditor(TextArea):
+class TextFileEditor(TextArea):
     BINDINGS = [
-        Binding("escape", "finish_edit", "Navigation", priority=True),
-        Binding("ctrl+left", "cursor_line_start", "Line start", priority=True),
-        Binding("ctrl+right", "cursor_line_end", "Line end", priority=True),
-        Binding("ctrl+shift+left", "cursor_line_start(True)", "Select to line start", priority=True),
-        Binding("ctrl+shift+right", "cursor_line_end(True)", "Select to line end", priority=True),
+        *TextArea.BINDINGS,
+        Binding("super+left", "cursor_line_start", "Line start", priority=True),
+        Binding("super+right", "cursor_line_end", "Line end", priority=True),
+        Binding("super+up", "cursor_document_start", "Document start", priority=True),
+        Binding("super+down", "cursor_document_end", "Document end", priority=True),
+        Binding("super+shift+left", "cursor_line_start(True)", "Select to line start", priority=True),
+        Binding("super+shift+right", "cursor_line_end(True)", "Select to line end", priority=True),
+        Binding("super+shift+up", "cursor_document_start(True)", "Select to document start", priority=True),
+        Binding("super+shift+down", "cursor_document_end(True)", "Select to document end", priority=True),
+        Binding("ctrl+left", "cursor_word_left", "Previous word", priority=True),
+        Binding("ctrl+right", "cursor_word_right", "Next word", priority=True),
+        Binding("ctrl+up", "cursor_document_start", "Document start", priority=True),
+        Binding("ctrl+down", "cursor_document_end", "Document end", priority=True),
+        Binding("ctrl+shift+left", "cursor_word_left(True)", "Select previous word", priority=True),
+        Binding("ctrl+shift+right", "cursor_word_right(True)", "Select next word", priority=True),
+        Binding("ctrl+shift+up", "cursor_document_start(True)", "Select to document start", priority=True),
+        Binding("ctrl+shift+down", "cursor_document_end(True)", "Select to document end", priority=True),
         Binding("alt+left", "cursor_word_left", "Previous word", priority=True),
         Binding("alt+right", "cursor_word_right", "Next word", priority=True),
         Binding("alt+shift+left", "cursor_word_left(True)", "Select previous word", priority=True),
         Binding("alt+shift+right", "cursor_word_right(True)", "Select next word", priority=True),
-        Binding("tab", "accept_completion", "Complete", priority=True),
-    ]
-
-    async def action_finish_edit(self) -> None:
-        await self.app._finish_edit()  # type: ignore[attr-defined]
-
-    def action_accept_completion(self) -> None:
-        self.app.accept_completion()  # type: ignore[attr-defined]
-
-
-class TextFileEditor(TextArea):
-    BINDINGS = [
-        *TextArea.BINDINGS,
         Binding("escape", "leave_edit", "Normal mode", priority=True),
         Binding("tab", "complete_or_indent", "Complete", priority=True),
     ]
 
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.vim_mode = "normal"
+        self._vim_pending = ""
+        self.read_only = True
+
     def action_leave_edit(self) -> None:
-        self.app.leave_text_editor()  # type: ignore[attr-defined]
+        self.app.arm_escape_close()  # type: ignore[attr-defined]
+        self.enter_normal_mode()
 
     def action_complete_or_indent(self) -> None:
+        if self.vim_mode != "insert":
+            return
         accepted = self.app.accept_completion()  # type: ignore[attr-defined]
         if not accepted:
             self.insert("    ")
+
+    def on_mount(self) -> None:
+        self.read_only = True
+
+    def enter_normal_mode(self) -> None:
+        self.vim_mode = "normal"
+        self.read_only = True
+        self._vim_pending = ""
+        self.app._update_status()  # type: ignore[attr-defined]
+
+    def action_cursor_document_start(self, select: bool = False) -> None:
+        self.move_cursor((0, 0), select=select)
+
+    def action_cursor_document_end(self, select: bool = False) -> None:
+        last_row = max(0, self.document.line_count - 1)
+        self.move_cursor((last_row, len(self.document[last_row])), select=select)
+
+    def enter_insert_mode(self, placement: str = "i") -> None:
+        self.read_only = False
+        if placement == "a":
+            self.action_cursor_right()
+        elif placement == "I":
+            self.action_cursor_line_start()
+        elif placement == "A":
+            self.action_cursor_line_end()
+        elif placement in {"o", "O"}:
+            row, _ = self.cursor_location
+            if placement == "o":
+                self.action_cursor_line_end()
+                self.insert("\n")
+            else:
+                self.move_cursor((row, 0))
+                self.insert("\n")
+                self.move_cursor((row, 0))
+        self.vim_mode = "insert"
+        self.read_only = False
+        self._vim_pending = ""
+        self.app._update_status()  # type: ignore[attr-defined]
+
+    def _delete_current_line(self, yank: bool = True) -> None:
+        row, _ = self.cursor_location
+        lines = self.text.splitlines(keepends=True)
+        if not lines:
+            return
+        row = min(row, len(lines) - 1)
+        content = lines[row]
+        if yank:
+            self.app.vim_register = content  # type: ignore[attr-defined]
+            self.app.vim_register_linewise = True  # type: ignore[attr-defined]
+        self.read_only = False
+        try:
+            if row < len(lines) - 1:
+                self.delete((row, 0), (row + 1, 0))
+            else:
+                self.delete((row, 0), (row, len(content.rstrip("\n"))))
+                if row and self.text.endswith("\n"):
+                    self.delete((row - 1, len(lines[row - 1].rstrip("\n"))), (row, 0))
+        finally:
+            self.read_only = True
+        self.move_cursor((min(row, max(0, len(self.text.splitlines()) - 1)), 0))
+
+    def _yank_current_line(self) -> None:
+        row, _ = self.cursor_location
+        lines = self.text.splitlines(keepends=True)
+        if lines:
+            self.app.vim_register = lines[min(row, len(lines) - 1)]  # type: ignore[attr-defined]
+            self.app.vim_register_linewise = True  # type: ignore[attr-defined]
+
+    def _paste(self, before: bool = False) -> None:
+        value = self.app.vim_register  # type: ignore[attr-defined]
+        if not value:
+            return
+        self.read_only = False
+        try:
+            if self.app.vim_register_linewise:  # type: ignore[attr-defined]
+                row, _ = self.cursor_location
+                lines = self.text.splitlines()
+                target = row if before else min(row + 1, len(lines))
+                self.insert(value if value.endswith("\n") else value + "\n", (target, 0))
+                self.move_cursor((target, 0))
+            else:
+                self.insert(value)
+        finally:
+            self.read_only = True
+
+    def _visual_action(self, operation: str) -> None:
+        selection = self.selection
+        selected = self.get_selection(selection)
+        if selected:
+            self.app.vim_register = selected  # type: ignore[attr-defined]
+            self.app.vim_register_linewise = False  # type: ignore[attr-defined]
+            if operation == "delete":
+                self.read_only = False
+                try:
+                    self.delete(selection.start, selection.end)
+                finally:
+                    self.read_only = True
+        self.enter_normal_mode()
+
+    async def on_key(self, event: events.Key) -> None:
+        if self.vim_mode == "insert":
+            return
+        key = event.key
+        if key == "q" and self.app._escape_close_armed:  # type: ignore[attr-defined]
+            event.stop()
+            event.prevent_default()
+            self.app._escape_close_armed = False  # type: ignore[attr-defined]
+            self.app.action_close_tab()  # type: ignore[attr-defined]
+            return
+        if key != "escape":
+            self.app._escape_close_armed = False  # type: ignore[attr-defined]
+        if key in {"left", "right", "up", "down", "pageup", "pagedown"}:
+            return
+        if key in {
+            "colon", "ctrl+s", "ctrl+p", "ctrl+b", "ctrl+tab", "ctrl+shift+tab",
+            "shift+tab", "ctrl+w", "ctrl+q", "left_square_bracket",
+            "right_square_bracket",
+        }:
+            return
+        event.stop()
+        event.prevent_default()
+        select = self.vim_mode == "visual"
+        motions = {
+            "h": lambda: self.action_cursor_left(select),
+            "j": lambda: self.action_cursor_down(select),
+            "k": lambda: self.action_cursor_up(select),
+            "l": lambda: self.action_cursor_right(select),
+            "w": lambda: self.action_cursor_word_right(select),
+            "b": lambda: self.action_cursor_word_left(select),
+            "0": lambda: self.action_cursor_line_start(select),
+            "dollar_sign": lambda: self.action_cursor_line_end(select),
+            "$": lambda: self.action_cursor_line_end(select),
+        }
+        if key in motions:
+            motions[key]()
+            self._vim_pending = ""
+        elif key in {"i", "a", "shift+i", "shift+a", "o", "shift+o"}:
+            self.enter_insert_mode({"shift+i": "I", "shift+a": "A", "shift+o": "O"}.get(key, key))
+        elif key == "g":
+            if self._vim_pending == "g":
+                self.action_cursor_document_start()
+                self._vim_pending = ""
+            else:
+                self._vim_pending = "g"
+        elif key == "shift+g":
+            self.action_cursor_document_end()
+            self._vim_pending = ""
+        elif key == "d":
+            if self.vim_mode == "visual":
+                self._visual_action("delete")
+            elif self._vim_pending == "d":
+                self._delete_current_line()
+                self._vim_pending = ""
+            else:
+                self._vim_pending = "d"
+        elif key == "y":
+            if self.vim_mode == "visual":
+                self._visual_action("yank")
+            elif self._vim_pending == "y":
+                self._yank_current_line()
+                self._vim_pending = ""
+            else:
+                self._vim_pending = "y"
+        elif key == "x":
+            self.read_only = False
+            try:
+                self.action_delete_right()
+            finally:
+                self.read_only = True
+            self._vim_pending = ""
+        elif key in {"p", "shift+p"}:
+            self._paste(before=key == "shift+p")
+            self._vim_pending = ""
+        elif key == "u":
+            self.action_undo()
+        elif key == "ctrl+r":
+            self.action_redo()
+        elif key == "v":
+            self.vim_mode = "normal" if self.vim_mode == "visual" else "visual"
+            self.app._update_status()  # type: ignore[attr-defined]
+        elif key == "escape":
+            self.enter_normal_mode()
+        else:
+            self._vim_pending = ""
+
+
+class CellEditor(TextFileEditor):
+    async def action_leave_edit(self) -> None:
+        self.app.arm_escape_close()  # type: ignore[attr-defined]
+        if self.vim_mode == "insert":
+            self.enter_normal_mode()
+        else:
+            await self.app._finish_edit()  # type: ignore[attr-defined]
 
 
 class SqlEditor(TextArea):
@@ -556,14 +759,8 @@ class NotebookApp(App[None]):
     }
     """
     BINDINGS = [
-        ("j,down", "next_cell", "Next"),
-        ("k,up", "previous_cell", "Previous"),
-        ("enter", "edit_cell", "Edit"),
-        ("r", "run_cell(False)", "Run"),
-        ("shift+r", "run_cell(True)", "Run + next"),
-        ("a", "insert_cell(False)", "Add below"),
-        ("shift+a", "insert_cell(True)", "Add above"),
-        ("m", "toggle_cell_type", "Code/Markdown"),
+        ("down", "next_cell", "Next"),
+        ("up", "previous_cell", "Previous"),
         ("colon", "command", "Command"),
         ("ctrl+s", "save", "Save"),
         ("ctrl+c", "interrupt", "Interrupt"),
@@ -576,7 +773,6 @@ class NotebookApp(App[None]):
         Binding("left_square_bracket", "previous_tab", "Previous tab"),
         Binding("right_square_bracket", "next_tab", "Next tab"),
         Binding("ctrl+q", "request_quit", "Quit", priority=True),
-        Binding("q", "request_quit", "Quit", show=False),
     ]
 
     def __init__(
@@ -626,6 +822,11 @@ class NotebookApp(App[None]):
         self.data_workspace: Optional[DuckDBWorkspace] = None
         self.remote: Optional[DatabricksRemote] = None
         self.last_remote_run_id: Optional[int] = None
+        self.vim_register = ""
+        self.vim_register_linewise = False
+        self._vim_cell_register: Optional[Cell] = None
+        self._vim_pending_key = ""
+        self._escape_close_armed = False
         self._sql_document_count = 0
 
     def compose(self) -> ComposeResult:
@@ -741,6 +942,9 @@ class NotebookApp(App[None]):
 
     def action_close_tab(self) -> None:
         self.run_worker(self._close_active_tab())
+
+    def arm_escape_close(self) -> None:
+        self._escape_close_armed = True
 
     async def _close_active_tab(self) -> None:
         async with self._tab_activation_lock:
@@ -966,11 +1170,8 @@ class NotebookApp(App[None]):
     def leave_text_editor(self) -> None:
         if self.text_editor is None or self.text_buffer is None:
             return
-        self.query_one("#tabs", TabBar).focus()
-        dirty = " ●" if self.text_buffer.dirty else ""
-        self.query_one("#status", Static).update(
-            f" NORMAL TEXT │ Enter: edit │ : commands │ {self.text_buffer.path.name}{dirty}"
-        )
+        if isinstance(self.text_editor, TextFileEditor):
+            self.text_editor.enter_normal_mode()
 
     def leave_sql_editor(self) -> None:
         if self.sql_editor is None or self.sql_document is None:
@@ -1015,8 +1216,14 @@ class NotebookApp(App[None]):
         self._refresh_tabs()
         if self.text_buffer is not None:
             dirty = " ●" if self.text_buffer.dirty else ""
+            mode = (
+                self.text_editor.vim_mode.upper()
+                if isinstance(self.text_editor, TextFileEditor)
+                else "NORMAL"
+            )
             self.query_one("#status", Static).update(
-                f" TEXT │ Ctrl+S: save │ Ctrl+P: find │ {self.text_buffer.path.name}{dirty}"
+                f" {mode} TEXT │ Ctrl+S: save │ Ctrl+P: find │ "
+                f"{self.text_buffer.path.name}{dirty}"
             )
             return
         if self.parquet_preview is not None:
@@ -1043,6 +1250,13 @@ class NotebookApp(App[None]):
         if self.inspection_report is not None:
             self.query_one("#status", Static).update(
                 " INSPECT │ metadata only · source remains unchanged │ Ctrl+W: close"
+            )
+            return
+        if self.editor is not None:
+            mode = self.editor.vim_mode.upper()
+            self.query_one("#status", Static).update(
+                f" {mode} CELL │ Cell {self.selected + 1}/{len(self.notebook.cells)} "
+                "│ Esc: cell Normal / notebook Normal │ Tab: complete"
             )
             return
         dirty = " ●" if self.notebook.dirty else ""
@@ -1614,10 +1828,11 @@ class NotebookApp(App[None]):
         if self._notebook_active and self.editor is None:
             self._select(self.selected - 1)
 
-    async def action_edit_cell(self) -> None:
+    async def action_edit_cell(self, insert: bool = True) -> None:
         if self.text_editor is not None:
             self.text_editor.focus()
-            self._update_status()
+            if isinstance(self.text_editor, TextFileEditor):
+                self.text_editor.enter_insert_mode("i")
             return
         if not self._notebook_active or self.editor is not None:
             return
@@ -1631,7 +1846,82 @@ class NotebookApp(App[None]):
         view.display = False
         await view.parent.mount(editor, before=view)
         editor.focus()
-        self.query_one("#status", Static).update(" EDIT │ Escape: navigation │ Ctrl+S: save")
+        if insert:
+            editor.enter_insert_mode("i")
+        else:
+            editor.enter_normal_mode()
+
+    async def action_open_cell(self, above: bool = False) -> None:
+        if self.text_editor is not None:
+            if isinstance(self.text_editor, TextFileEditor):
+                self.text_editor.enter_insert_mode("O" if above else "o")
+            return
+        await self.action_insert_cell(above)
+        await self.action_edit_cell()
+
+    def _record_notebook_undo(self) -> None:
+        if not self._notebook_active:
+            return
+        tab = self._active_tab
+        tab.notebook_undo.append((copy.deepcopy(self.notebook.cells), self.selected))
+        if len(tab.notebook_undo) > 100:
+            tab.notebook_undo.pop(0)
+        tab.notebook_redo.clear()
+
+    async def action_vim_undo(self) -> None:
+        if not self._notebook_active or self.editor is not None:
+            return
+        tab = self._active_tab
+        if not tab.notebook_undo:
+            return
+        tab.notebook_redo.append((copy.deepcopy(self.notebook.cells), self.selected))
+        cells, selected = tab.notebook_undo.pop()
+        self.notebook.cells = copy.deepcopy(cells)
+        self.notebook.dirty = True
+        await self._rebuild_cells(selected)
+
+    async def action_vim_redo(self) -> None:
+        if not self._notebook_active or self.editor is not None:
+            return
+        tab = self._active_tab
+        if not tab.notebook_redo:
+            return
+        tab.notebook_undo.append((copy.deepcopy(self.notebook.cells), self.selected))
+        cells, selected = tab.notebook_redo.pop()
+        self.notebook.cells = copy.deepcopy(cells)
+        self.notebook.dirty = True
+        await self._rebuild_cells(selected)
+
+    def action_yank_cell(self) -> None:
+        if not self._notebook_active or self.editor is not None:
+            return
+        self._vim_cell_register = copy.deepcopy(self.notebook.cells[self.selected])
+        self.notify(f"Yanked cell {self.selected + 1}")
+
+    async def action_paste_cell(self, above: bool = False) -> None:
+        if not self._notebook_active or self.editor is not None or self._vim_cell_register is None:
+            return
+        self._record_notebook_undo()
+        cell = copy.deepcopy(self._vim_cell_register)
+        cell.cell_id = uuid.uuid4().hex[:8]
+        index = self.selected if above else self.selected + 1
+        self.notebook.cells.insert(index, cell)
+        self.notebook.dirty = True
+        await self._rebuild_cells(index)
+
+    async def action_vim_delete_cell(self) -> None:
+        if not self._notebook_active or self.editor is not None:
+            return
+        self._vim_cell_register = copy.deepcopy(self.notebook.cells[self.selected])
+        await self.action_delete_cell()
+
+    def action_first_cell(self) -> None:
+        if self._notebook_active and self.editor is None:
+            self._select(0)
+
+    def action_last_cell(self) -> None:
+        if self._notebook_active and self.editor is None:
+            self._select(len(self.notebook.cells) - 1)
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
         """Request suggestions without blocking interactive editing."""
@@ -1712,9 +2002,87 @@ class NotebookApp(App[None]):
         return True
 
     async def on_key(self, event: events.Key) -> None:
-        if event.key == "escape" and self.editor is not None:
+        if self.editor is not None or self.sql_editor is not None:
+            return
+        if self.text_editor is not None and self.text_editor.has_focus:
+            return
+        if not self._notebook_active:
+            return
+        if not isinstance(self.focused, CellView):
+            return
+
+        key = event.key
+        if key == "q" and self._escape_close_armed:
             event.stop()
-            await self._finish_edit()
+            event.prevent_default()
+            self._escape_close_armed = False
+            self.action_close_tab()
+            return
+        if key == "escape":
+            self.arm_escape_close()
+        else:
+            self._escape_close_armed = False
+        if key == "ctrl+r":
+            event.stop()
+            event.prevent_default()
+            await self.action_vim_redo()
+            return
+        if key in {
+            "down", "up", "colon", "left_square_bracket", "right_square_bracket",
+            "shift+tab",
+        } or key.startswith("ctrl+"):
+            return
+        event.stop()
+        event.prevent_default()
+        if key == "j":
+            self.action_next_cell()
+        elif key == "k":
+            self.action_previous_cell()
+        elif key == "i":
+            await self.action_edit_cell()
+        elif key == "enter":
+            await self.action_edit_cell(insert=False)
+        elif key in {"o", "shift+o"}:
+            await self.action_open_cell(above=key == "shift+o")
+        elif key == "r":
+            self.action_run_cell(False)
+        elif key == "shift+r":
+            self.action_run_cell(True)
+        elif key == "shift+j":
+            await self.action_move_cell(1)
+        elif key == "shift+k":
+            await self.action_move_cell(-1)
+        elif key == "m":
+            self.action_toggle_cell_type()
+        elif key == "u":
+            await self.action_vim_undo()
+        elif key in {"p", "shift+p"}:
+            await self.action_paste_cell(above=key == "shift+p")
+        elif key == "shift+g":
+            self.action_last_cell()
+            self._vim_pending_key = ""
+        elif key == "g":
+            if self._vim_pending_key == "g":
+                self.action_first_cell()
+                self._vim_pending_key = ""
+            else:
+                self._vim_pending_key = "g"
+        elif key == "d":
+            if self._vim_pending_key == "d":
+                await self.action_vim_delete_cell()
+                self._vim_pending_key = ""
+            else:
+                self._vim_pending_key = "d"
+        elif key == "y":
+            if self._vim_pending_key == "y":
+                self.action_yank_cell()
+                self._vim_pending_key = ""
+            else:
+                self._vim_pending_key = "y"
+        elif key == "escape":
+            self._vim_pending_key = ""
+        else:
+            self._vim_pending_key = ""
 
     async def _finish_edit(self) -> None:
         assert self.editor is not None
@@ -1722,6 +2090,7 @@ class NotebookApp(App[None]):
         await self._clear_completions()
         cell = self.notebook.cells[self.selected]
         if cell.source != editor.text:
+            self._record_notebook_undo()
             cell.source = editor.text
             self.notebook.dirty = True
             self._refresh_tabs()
@@ -1741,6 +2110,7 @@ class NotebookApp(App[None]):
         if self._running_cells:
             self.notify("Wait for execution to finish before changing cell structure", severity="warning")
             return
+        self._record_notebook_undo()
         insert_at = self.selected if above else self.selected + 1
         self.notebook.cells.insert(
             insert_at,
@@ -1760,6 +2130,7 @@ class NotebookApp(App[None]):
         if len(self.notebook.cells) == 1:
             self.notify("A notebook must contain at least one cell", severity="warning")
             return
+        self._record_notebook_undo()
         removed = self.notebook.cells.pop(self.selected)
         if removed.cell_id:
             self._collapsed_outputs.discard(removed.cell_id)
@@ -1775,6 +2146,7 @@ class NotebookApp(App[None]):
         if self._running_cells:
             self.notify("Wait for execution to finish before duplicating cells", severity="warning")
             return
+        self._record_notebook_undo()
         duplicate = copy.deepcopy(self.notebook.cells[self.selected])
         duplicate.cell_id = uuid.uuid4().hex[:8]
         insert_at = self.selected + 1
@@ -1794,6 +2166,7 @@ class NotebookApp(App[None]):
         destination = self.selected + direction
         if not 0 <= destination < len(self.notebook.cells):
             return
+        self._record_notebook_undo()
         self.notebook.cells[self.selected], self.notebook.cells[destination] = (
             self.notebook.cells[destination], self.notebook.cells[self.selected]
         )
@@ -1804,6 +2177,7 @@ class NotebookApp(App[None]):
         if not self._notebook_active or self.editor is not None or self.selected in self._running_cells:
             return
         cell = self.notebook.cells[self.selected]
+        self._record_notebook_undo()
         if cell.cell_type == CellType.CODE:
             cell.cell_type = CellType.MARKDOWN
             cell.execution_count = None
@@ -1881,7 +2255,12 @@ class NotebookApp(App[None]):
         self.notify("Notebook outputs cleared")
 
     def action_command(self) -> None:
-        if self.editor is not None or (self.text_editor is not None and self.text_editor.has_focus):
+        text_in_insert = (
+            isinstance(self.text_editor, TextFileEditor)
+            and self.text_editor.has_focus
+            and self.text_editor.vim_mode == "insert"
+        )
+        if self.editor is not None or text_in_insert:
             return
         command = self.query_one("#command", CommandInput)
         suggestions = self._contextual_command_suggestions()
@@ -2049,18 +2428,11 @@ class NotebookApp(App[None]):
             await self._dispatch_git_command(command)
         elif command == "help":
             self.notify("\n".join(f":{item}" for item in COMMANDS), title="Commands", timeout=15)
-        elif command == "quit":
+        elif command == "exit":
             await self.action_request_quit()
-        elif command == "write quit":
+        elif command == "write close":
             if self._save():
-                if any(tab.dirty for tab in self.tabs):
-                    self.notify(
-                        "Other tabs have unsaved changes; save them before quitting",
-                        severity="warning",
-                    )
-                else:
-                    await self._shutdown_all_kernels()
-                    self.exit()
+                await self._close_active_tab()
         elif command:
             self.notify(f"Unknown command: {command}", severity="warning")
 
@@ -2301,7 +2673,7 @@ class NotebookApp(App[None]):
             if not self._quit_armed:
                 self._quit_armed = True
                 self.notify(
-                    "Unsaved changes — Ctrl+S to save, invoke quit again to discard",
+                    "Unsaved changes — Ctrl+S to save, invoke :exit again to discard",
                     severity="warning",
                 )
                 return
