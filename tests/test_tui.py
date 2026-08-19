@@ -88,6 +88,37 @@ async def test_notebook_vim_normal_mode_cell_operations():
 
 
 @pytest.mark.asyncio
+async def test_app_themes_switch_chrome_editor_and_syntax_palette():
+    notebook = Notebook(
+        path=Path("example.ipynb"),
+        cells=[Cell(CellType.CODE, "value = 1", cell_id="cell0001")],
+    )
+    app = NotebookApp(notebook)
+
+    async with app.run_test(size=(100, 32)) as pilot:
+        assert app.theme == "default"
+        assert app.syntax_theme == "ansi_dark"
+
+        for name in (
+            "vscode-dark", "vscode-light", "databricks-light", "snowflake"
+        ):
+            await app._dispatch_command(f"theme {name}")
+            await pilot.pause()
+            assert app.theme == name
+            assert app._nbcli_theme == name
+
+        assert not app.current_theme.dark
+        await pilot.press("enter")
+        assert app.editor is not None
+        assert app.editor.theme == "nbcli-snowflake"
+
+        await app._dispatch_command("theme default")
+        assert app.editor is not None
+        assert app.editor.theme == "monokai"
+        assert app.current_theme.dark
+
+
+@pytest.mark.asyncio
 async def test_run_binding_executes_selected_cell():
     notebook = Notebook(
         path=Path("example.ipynb"),

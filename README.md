@@ -149,6 +149,20 @@ Python text files and Python notebook cells receive local Jedi completions;
 press `Tab` to accept a displayed completion. Markdown and other supported text
 files retain syntax highlighting without Python completions.
 
+Switch the entire interface palette at runtime with `:theme NAME`. The theme
+updates application chrome, notebook cells, editors, syntax colors, selections,
+overlays, tables, and the integrated terminal together. Five themes are built in:
+
+```text
+:theme default             Original nbcli appearance
+:theme vscode-dark         VS Code Dark Modern-inspired dark palette
+:theme vscode-light        VS Code Light Modern-inspired light palette
+:theme databricks-light    Databricks workspace-inspired light palette
+:theme snowflake           Snowflake Workspaces-inspired airy light palette
+```
+
+Use `:theme` without a name to see the active theme and available choices.
+
 Editable files open in Vim-style Normal mode and cannot be changed until you
 press `i`, `a`, `I`, `A`, `o`, or `O`. The status bar shows `NORMAL`, `INSERT`,
 or `VISUAL`. In a text file, Normal mode supports `h`/`j`/`k`/`l`, `w`/`b`,

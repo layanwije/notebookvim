@@ -36,6 +36,14 @@ from .rendering import render_cell
 from .remote import DatabricksRemote, RemoteError, RemoteReport, SyncStatus
 from .storage import load_notebook, new_notebook, save_notebook, to_node
 from .terminal import TerminalInput, TerminalPane, VSCODE_DARK_TERMINAL_THEME
+from .themes import (
+    APP_THEMES,
+    EDITOR_THEMES,
+    EDITOR_THEME_NAMES,
+    RICH_SYNTAX_THEMES,
+    TERMINAL_THEMES,
+    THEME_NAMES,
+)
 from .workspace import (
     TextBuffer,
     ParquetPreview,
@@ -58,7 +66,10 @@ class CellView(Static, can_focus=True):
 
     def render(self):
         return render_cell(
-            self.notebook.cells[self.index], self.index, show_output=not self.output_collapsed
+            self.notebook.cells[self.index],
+            self.index,
+            show_output=not self.output_collapsed,
+            syntax_theme=getattr(self.app, "syntax_theme", "ansi_dark"),
         )
 
 
@@ -697,7 +708,7 @@ class NotebookApp(App[None]):
     #terminal-pane {
         width: 45%; min-width: 30; height: 100%; min-height: 8;
         border-left: solid $surface-lighten-2;
-        background: #181818; color: #cccccc;
+        background: $terminal-background; color: $terminal-foreground;
     }
     #document-column.terminal-below { layout: vertical; }
     #document-column.terminal-below #notebook { width: 100%; height: 1fr; }
@@ -705,10 +716,13 @@ class NotebookApp(App[None]):
         width: 100%; min-width: 0; height: 40%;
         border-left: none; border-top: solid $surface-lighten-2;
     }
-    #terminal-output { height: 1fr; padding: 0 1; background: #181818; color: #cccccc; }
+    #terminal-output {
+        height: 1fr; padding: 0 1;
+        background: $terminal-background; color: $terminal-foreground;
+    }
     #terminal-input {
         height: 3; border: tall $surface-lighten-2; padding: 0 1;
-        background: #181818; color: #cccccc;
+        background: $terminal-background; color: $terminal-foreground;
     }
     #inspection-pane {
         width: 45%; min-width: 32; height: 100%; padding: 1;
@@ -750,7 +764,10 @@ class NotebookApp(App[None]):
         margin: -1 0 1 4; padding: 0 1;
         background: $panel; border: round $accent;
     }
-    #status { dock: bottom; height: 1; padding: 0 1; background: $primary-darken-2; }
+    #status {
+        dock: bottom; height: 1; padding: 0 1;
+        background: $status-background; color: $status-foreground;
+    }
     #command {
         dock: bottom; height: 3; border: tall $accent; padding: 0 1;
     }
@@ -782,7 +799,13 @@ class NotebookApp(App[None]):
         initial_path: Optional[Path] = None,
     ) -> None:
         super().__init__()
+        for app_theme in APP_THEMES.values():
+            self.register_theme(app_theme)
+        self._nbcli_theme = "default"
+        self.syntax_theme = RICH_SYNTAX_THEMES["default"]
+        self.theme = "default"
         self.ansi_theme_dark = VSCODE_DARK_TERMINAL_THEME
+        self.ansi_theme_light = TERMINAL_THEMES["default"]
         self.notebook = notebook
         self.workspace_root = Path(workspace_root or notebook.path.parent).resolve()
         self.initial_path = Path(initial_path).resolve() if initial_path is not None else None
@@ -861,6 +884,34 @@ class NotebookApp(App[None]):
         self._update_status("IDLE")
         if self.initial_path is not None and self.initial_path != self.notebook.path.resolve():
             self.run_worker(self._open_project_file(self.initial_path))
+
+    def _configure_editor_theme(self, editor: TextArea) -> None:
+        custom_theme = EDITOR_THEMES.get(self._nbcli_theme)
+        if custom_theme is not None:
+            editor.register_theme(copy.deepcopy(custom_theme))
+        editor.theme = EDITOR_THEME_NAMES[self._nbcli_theme]
+
+    def action_set_app_theme(self, name: str) -> None:
+        normalized = name.strip().lower()
+        if normalized not in THEME_NAMES:
+            self.notify(
+                f"Unknown theme: {name or '—'}\nAvailable: {', '.join(THEME_NAMES)}",
+                title="Theme",
+                severity="warning",
+            )
+            return
+        self._nbcli_theme = normalized
+        self.syntax_theme = RICH_SYNTAX_THEMES[normalized]
+        terminal_theme = TERMINAL_THEMES[normalized]
+        self.ansi_theme_dark = terminal_theme
+        self.ansi_theme_light = terminal_theme
+        self.theme = normalized
+        for editor in self.query(TextArea):
+            self._configure_editor_theme(editor)
+        for view in self.query(CellView):
+            view.refresh(layout=True)
+        self.terminal_pane.refresh(layout=True)
+        self.notify(f"Theme: {normalized}", title="Appearance")
 
     def _project_tree(self) -> ProjectTree:
         tree = ProjectTree(self.workspace_root.name, self.workspace_root, id="files")
@@ -1036,6 +1087,7 @@ class NotebookApp(App[None]):
             editor = SqlEditor.code_editor(
                 tab.sql_document.query, language="sql", id="sql-editor"
             )
+            self._configure_editor_theme(editor)
             editor.add_class("sql-editor")
             editor.border_title = "DuckDB SQL"
             self.sql_editor = editor
@@ -1374,6 +1426,7 @@ class NotebookApp(App[None]):
             language=buffer.language,
             id="text-file-editor",
         )
+        self._configure_editor_theme(editor)
         editor.add_class("text-file-editor")
         await notebook_view.mount(editor)
         return editor
@@ -1839,6 +1892,7 @@ class NotebookApp(App[None]):
         cell = self.notebook.cells[self.selected]
         language = "python" if cell.cell_type == CellType.CODE else None
         editor = CellEditor.code_editor(cell.source, language=language, id="cell-editor")
+        self._configure_editor_theme(editor)
         editor.add_class("cell-editor")
         editor.border_title = f"Cell {self.selected + 1} · Edit"
         self.editor = editor
@@ -2400,6 +2454,13 @@ class NotebookApp(App[None]):
             self._save_profile()
         elif command.startswith("inspect "):
             await self._dispatch_inspect_command(command)
+        elif command == "theme":
+            self.notify(
+                f"Current: {self._nbcli_theme}\nAvailable: {', '.join(THEME_NAMES)}",
+                title="Theme",
+            )
+        elif command.startswith("theme "):
+            self.action_set_app_theme(command.removeprefix("theme "))
         elif command == "databricks connect" or command.startswith("databricks connect "):
             profile = command.removeprefix("databricks connect").strip() or None
             await self._connect_databricks(profile)

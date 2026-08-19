@@ -39,6 +39,10 @@ def test_completion_catalog_contains_full_commands_and_aliases():
     assert "databricks jobs running" in COMMAND_SUGGESTIONS
     assert "inspect parquet describe" in COMMAND_SUGGESTIONS
     assert "inspect delta time travel" in COMMAND_SUGGESTIONS
+    assert "theme default" in COMMAND_SUGGESTIONS
+    assert "theme vscode-dark" in COMMAND_SUGGESTIONS
+    assert "theme databricks-light" in COMMAND_SUGGESTIONS
+    assert "theme snowflake" in COMMAND_SUGGESTIONS
 
 
 def test_remote_command_arguments_preserve_case():
