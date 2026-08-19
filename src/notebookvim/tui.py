@@ -83,7 +83,7 @@ class CellView(Static, can_focus=True):
 class EmptyWorkspace(Static, can_focus=True):
     def __init__(self) -> None:
         super().__init__(
-            "[bold]Notebook CLI[/bold]\n"
+            "[bold]NotebookVim[/bold]\n"
             "Vim-like experience for the World of Data\n\n"
             "Press [bold]Esc[/bold], then [bold]:[/bold] for commands\n"
             "Use [bold]:help[/bold] for the command reference\n\n"
@@ -774,7 +774,7 @@ class TabBar(Tabs):
 
 
 class NotebookApp(App[None]):
-    TITLE = "nbcli"
+    TITLE = "notebookvim"
     CSS = """
     Screen { background: $surface; }
     #workspace { height: 1fr; }
@@ -908,10 +908,10 @@ class NotebookApp(App[None]):
         for app_theme in APP_THEMES.values():
             self.register_theme(app_theme)
         saved_theme = load_theme()
-        self._nbcli_theme = saved_theme if saved_theme in THEME_NAMES else DEFAULT_THEME
-        self.syntax_theme = RICH_SYNTAX_THEMES[self._nbcli_theme]
-        self.theme = self._nbcli_theme
-        terminal_theme = TERMINAL_THEMES[self._nbcli_theme]
+        self._notebookvim_theme = saved_theme if saved_theme in THEME_NAMES else DEFAULT_THEME
+        self.syntax_theme = RICH_SYNTAX_THEMES[self._notebookvim_theme]
+        self.theme = self._notebookvim_theme
+        terminal_theme = TERMINAL_THEMES[self._notebookvim_theme]
         self.ansi_theme_dark = terminal_theme
         self.ansi_theme_light = terminal_theme
         self.notebook = notebook
@@ -1012,10 +1012,10 @@ class NotebookApp(App[None]):
             self.run_worker(self._open_project_file(self.initial_path))
 
     def _configure_editor_theme(self, editor: TextArea) -> None:
-        custom_theme = EDITOR_THEMES.get(self._nbcli_theme)
+        custom_theme = EDITOR_THEMES.get(self._notebookvim_theme)
         if custom_theme is not None:
             editor.register_theme(copy.deepcopy(custom_theme))
-        editor.theme = EDITOR_THEME_NAMES[self._nbcli_theme]
+        editor.theme = EDITOR_THEME_NAMES[self._notebookvim_theme]
 
     def action_set_app_theme(self, name: str) -> None:
         normalized = name.strip().lower()
@@ -1026,7 +1026,7 @@ class NotebookApp(App[None]):
                 severity="warning",
             )
             return
-        self._nbcli_theme = normalized
+        self._notebookvim_theme = normalized
         self.syntax_theme = RICH_SYNTAX_THEMES[normalized]
         terminal_theme = TERMINAL_THEMES[normalized]
         self.ansi_theme_dark = terminal_theme
@@ -1083,7 +1083,7 @@ class NotebookApp(App[None]):
         tree.root.expand()
 
     def _refresh_project_files(self) -> None:
-        """Rescan files created while nbcli is running and rebuild navigation."""
+        """Rescan files created while notebookvim is running and rebuild navigation."""
         self.project_paths = project_files(self.workspace_root)
         tree = self.query_one("#files", ProjectTree)
         tree.root.remove_children()
@@ -1857,7 +1857,7 @@ class NotebookApp(App[None]):
         if existing is not None:
             await self._activate_tab(existing)
             return
-        help_text = files("notebookcli").joinpath("HELP.md").read_text(encoding="utf-8")
+        help_text = files("notebookvim").joinpath("HELP.md").read_text(encoding="utf-8")
         await self._append_tab(
             DocumentTab(
                 path=Path("HELP.md"),
@@ -1898,7 +1898,7 @@ class NotebookApp(App[None]):
         document = SqlDocument(name=name)
         await self._append_tab(
             DocumentTab(
-                path=self.workspace_root / f".nbcli-sql-{self._sql_document_count}.sql",
+                path=self.workspace_root / f".notebookvim-sql-{self._sql_document_count}.sql",
                 sql_document=document,
             )
         )
@@ -1981,7 +1981,7 @@ class NotebookApp(App[None]):
             return
         await self._append_tab(
             DocumentTab(
-                path=self.workspace_root / f".nbcli-profile-{len(self.tabs)}.json",
+                path=self.workspace_root / f".notebookvim-profile-{len(self.tabs)}.json",
                 dataset_profile=profile,
             )
         )
@@ -2071,7 +2071,7 @@ class NotebookApp(App[None]):
                 )
                 await self._append_tab(
                     DocumentTab(
-                        path=self.workspace_root / f".nbcli-profile-{len(self.tabs)}.json",
+                        path=self.workspace_root / f".notebookvim-profile-{len(self.tabs)}.json",
                         dataset_profile=profile,
                     )
                 )
@@ -2121,7 +2121,7 @@ class NotebookApp(App[None]):
     async def _show_remote_report(self, report: RemoteReport) -> None:
         await self._append_tab(
             DocumentTab(
-                path=self.workspace_root / f".nbcli-remote-{uuid.uuid4().hex}.txt",
+                path=self.workspace_root / f".notebookvim-remote-{uuid.uuid4().hex}.txt",
                 remote_report=report,
             )
         )
@@ -3056,8 +3056,8 @@ class NotebookApp(App[None]):
             await self._dispatch_inspect_command(command)
         elif command == "theme":
             self.notify(
-                f"Current: {self._nbcli_theme}\n"
-                f"Recommended font: {THEME_FONTS[self._nbcli_theme]}\n"
+                f"Current: {self._notebookvim_theme}\n"
+                f"Recommended font: {THEME_FONTS[self._notebookvim_theme]}\n"
                 f"Available: {', '.join(THEME_NAMES)}",
                 title="Theme",
             )

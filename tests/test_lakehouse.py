@@ -4,7 +4,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from notebookcli.lakehouse import DeltaLog, LakehouseInspector, find_delta_root
+from notebookvim.lakehouse import DeltaLog, LakehouseInspector, find_delta_root
 
 
 def write_actions(path: Path, actions: list[dict]) -> None:

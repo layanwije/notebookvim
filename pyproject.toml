@@ -3,9 +3,9 @@ requires = ["hatchling>=1.26"]
 build-backend = "hatchling.build"
 
 [project]
-name = "notebookcli"
+name = "notebookvim"
 version = "0.1.0"
-description = "A terminal-native interactive notebook"
+description = "A Vim-inspired terminal workspace for Jupyter notebooks"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { file = "LICENSE" }
@@ -49,15 +49,15 @@ dev = [
 ]
 
 [project.scripts]
-notebookcli = "notebookcli.cli:main"
+notebookvim = "notebookvim.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/layanwije/notebookcli"
-Issues = "https://github.com/layanwije/notebookcli/issues"
-Repository = "https://github.com/layanwije/notebookcli.git"
+Homepage = "https://github.com/layanwije/notebookvim"
+Issues = "https://github.com/layanwije/notebookvim/issues"
+Repository = "https://github.com/layanwije/notebookvim.git"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/notebookcli"]
+packages = ["src/notebookvim"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

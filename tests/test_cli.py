@@ -3,19 +3,19 @@ import sys
 
 from typer.testing import CliRunner
 
-from notebookcli import cli
+from notebookvim import cli
 
 
 def test_new_and_info_commands(tmp_path):
     path = tmp_path / "cli.ipynb"
     created = subprocess.run(
-        [sys.executable, "-m", "notebookcli", "new", str(path)],
+        [sys.executable, "-m", "notebookvim", "new", str(path)],
         check=True,
         capture_output=True,
         text=True,
     )
     inspected = subprocess.run(
-        [sys.executable, "-m", "notebookcli", "info", str(path)],
+        [sys.executable, "-m", "notebookvim", "info", str(path)],
         check=True,
         capture_output=True,
         text=True,

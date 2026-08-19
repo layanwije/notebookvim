@@ -107,7 +107,7 @@ class TerminalPane(Vertical):
         yield TerminalInput(id="terminal-input")
 
     def on_mount(self) -> None:
-        self._write(f"nbcli terminal · {self.cwd}", style="bold cyan")
+        self._write(f"notebookvim terminal · {self.cwd}", style="bold cyan")
         self._update_prompt()
 
     def _update_prompt(self) -> None:
@@ -118,7 +118,7 @@ class TerminalPane(Vertical):
         self.previous_cwd = self.cwd
         self.cwd = Path(workspace_root).resolve()
         self._update_prompt()
-        self._write(f"nbcli workspace · {self.cwd}", style="bold cyan")
+        self._write(f"notebookvim workspace · {self.cwd}", style="bold cyan")
 
     def _write(self, value: str, style: str = "") -> None:
         clean = safe_text(value)

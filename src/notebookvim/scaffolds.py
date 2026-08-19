@@ -19,7 +19,7 @@ Databricks workspace project organized around the medallion architecture.
 - `tests`: local unit tests
 """,
     ".gitignore": """.databricks/
-.nbcli/
+.notebookvim/
 .pytest_cache/
 .venv/
 __pycache__/

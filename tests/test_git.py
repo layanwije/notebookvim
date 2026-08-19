@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from notebookcli.git import GitError, GitProfile, GitService
+from notebookvim.git import GitError, GitProfile, GitService
 
 
 def init_repository(path: Path) -> GitService:
@@ -47,7 +47,7 @@ def test_github_login_uses_named_account(tmp_path, monkeypatch):
     repository = init_repository(tmp_path / "repo")
     global_config = tmp_path / "global.gitconfig"
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
-    monkeypatch.setattr("notebookcli.git.shutil.which", lambda command: "/usr/bin/gh" if command == "gh" else None)
+    monkeypatch.setattr("notebookvim.git.shutil.which", lambda command: "/usr/bin/gh" if command == "gh" else None)
     repository.add_profile(
         GitProfile("personal", "github", "octocat", "octo@example.com", "Octo Cat")
     )

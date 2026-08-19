@@ -1,7 +1,7 @@
 from rich.console import Console
 
-from notebookcli.model import Cell, CellType, DisplayOutput, ErrorOutput, StreamOutput
-from notebookcli.rendering import render_cell, safe_text
+from notebookvim.model import Cell, CellType, DisplayOutput, ErrorOutput, StreamOutput
+from notebookvim.rendering import render_cell, safe_text
 
 
 def test_safe_text_removes_terminal_control_sequences():

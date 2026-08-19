@@ -152,7 +152,7 @@ class OllamaProvider(AIProvider):
 
     def __init__(self, model: Optional[str] = None) -> None:
         super().__init__()
-        self.model = model or os.environ.get("NBCLI_OLLAMA_MODEL", "llama3.2")
+        self.model = model or os.environ.get("NOTEBOOKVIM_OLLAMA_MODEL", "llama3.2")
 
     def command(self, prompt: str, workspace: Path) -> list[str]:
         # Suppress Ollama's cursor-driven thinking display and host-width wrapping;

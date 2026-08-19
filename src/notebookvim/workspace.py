@@ -12,7 +12,7 @@ IGNORED_DIRECTORIES = {
     ".git",
     ".hg",
     ".mypy_cache",
-    ".nbcli",
+    ".notebookvim",
     ".pytest_cache",
     ".ruff_cache",
     ".tox",

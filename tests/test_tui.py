@@ -3,22 +3,22 @@ from pathlib import Path
 
 import pytest
 
-from notebookcli.workspace import ParquetPreview
-from notebookcli.kernel import ExecutionUpdate
-from notebookcli.databricks import DatabricksConnection
-from notebookcli.model import Cell, CellType, ExecutionState, Notebook, StreamOutput
-from notebookcli.preferences import load_theme, save_theme
-from notebookcli.remote import RemoteMapping, SyncStatus
-from notebookcli.storage import load_notebook, new_notebook, save_notebook
-from notebookcli.terminal import TerminalInput, TerminalPane
-from notebookcli.themes import RICH_SYNTAX_THEMES
-from notebookcli.ai_pane import AIPane
-from notebookcli.tui import EmptyWorkspace, InspectionModal, NotebookApp, TabBar
+from notebookvim.workspace import ParquetPreview
+from notebookvim.kernel import ExecutionUpdate
+from notebookvim.databricks import DatabricksConnection
+from notebookvim.model import Cell, CellType, ExecutionState, Notebook, StreamOutput
+from notebookvim.preferences import load_theme, save_theme
+from notebookvim.remote import RemoteMapping, SyncStatus
+from notebookvim.storage import load_notebook, new_notebook, save_notebook
+from notebookvim.terminal import TerminalInput, TerminalPane
+from notebookvim.themes import RICH_SYNTAX_THEMES
+from notebookvim.ai_pane import AIPane
+from notebookvim.tui import EmptyWorkspace, InspectionModal, NotebookApp, TabBar
 
 
 @pytest.mark.asyncio
 async def test_ai_pane_opens_and_switches_provider(tmp_path, monkeypatch):
-    monkeypatch.setenv("NBCLI_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("NOTEBOOKVIM_CONFIG_HOME", str(tmp_path / "config"))
     notebook = Notebook(
         path=tmp_path / "example.ipynb",
         cells=[Cell(CellType.CODE, "answer = 42", cell_id="cell0001")],
@@ -43,7 +43,7 @@ async def test_ai_pane_opens_and_switches_provider(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_ai_pane_can_open_below_and_return_to_default_side(tmp_path, monkeypatch):
-    monkeypatch.setenv("NBCLI_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("NOTEBOOKVIM_CONFIG_HOME", str(tmp_path / "config"))
     notebook = Notebook(
         path=tmp_path / "example.ipynb",
         cells=[Cell(CellType.CODE, "answer = 42", cell_id="cell0001")],
@@ -65,7 +65,7 @@ async def test_ai_pane_can_open_below_and_return_to_default_side(tmp_path, monke
 
 @pytest.mark.asyncio
 async def test_navigation_and_editing(tmp_path, monkeypatch):
-    monkeypatch.setenv("NBCLI_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("NOTEBOOKVIM_CONFIG_HOME", str(tmp_path / "config"))
     notebook = Notebook(
         path=Path("example.ipynb"),
         cells=[
@@ -83,7 +83,7 @@ async def test_navigation_and_editing(tmp_path, monkeypatch):
         await pilot.press("k", "i")
         assert app.editor is not None
         assert app.editor.language == "python"
-        assert app.editor.theme == "nbcli-databricks-dark"
+        assert app.editor.theme == "notebookvim-databricks-dark"
         app.editor.text = "value = 2"
         await pilot.press("escape", "escape")
         await pilot.pause()
@@ -140,7 +140,7 @@ async def test_notebook_vim_normal_mode_cell_operations():
 
 @pytest.mark.asyncio
 async def test_app_themes_switch_chrome_editor_and_syntax_palette(tmp_path, monkeypatch):
-    monkeypatch.setenv("NBCLI_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("NOTEBOOKVIM_CONFIG_HOME", str(tmp_path / "config"))
     notebook = Notebook(
         path=Path("example.ipynb"),
         cells=[Cell(CellType.CODE, "value = 1", cell_id="cell0001")],
@@ -158,7 +158,7 @@ async def test_app_themes_switch_chrome_editor_and_syntax_palette(tmp_path, monk
             await app._dispatch_command(f"theme {name}")
             await pilot.pause()
             assert app.theme == name
-            assert app._nbcli_theme == name
+            assert app._notebookvim_theme == name
             if name in {"vscode-light", "databricks-light", "snowflake-light"}:
                 status = app.query_one("#status")
                 assert status.styles.color.hex == "#FFFFFF"
@@ -167,7 +167,7 @@ async def test_app_themes_switch_chrome_editor_and_syntax_palette(tmp_path, monk
         assert app.current_theme.dark
         await pilot.press("enter")
         assert app.editor is not None
-        assert app.editor.theme == "nbcli-snowflake-dark"
+        assert app.editor.theme == "notebookvim-snowflake-dark"
 
         await app._dispatch_command("theme default")
         assert app.editor is not None
@@ -178,7 +178,7 @@ async def test_app_themes_switch_chrome_editor_and_syntax_palette(tmp_path, monk
 
 @pytest.mark.asyncio
 async def test_saved_theme_is_restored_on_startup(tmp_path, monkeypatch):
-    monkeypatch.setenv("NBCLI_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("NOTEBOOKVIM_CONFIG_HOME", str(tmp_path / "config"))
     save_theme("databricks-light")
     notebook = Notebook(
         path=Path("example.ipynb"),
@@ -187,7 +187,7 @@ async def test_saved_theme_is_restored_on_startup(tmp_path, monkeypatch):
     app = NotebookApp(notebook)
 
     assert app.theme == "databricks-light"
-    assert app._nbcli_theme == "databricks-light"
+    assert app._notebookvim_theme == "databricks-light"
     async with app.run_test(size=(100, 32)):
         status = app.query_one("#status")
         assert status.styles.color.hex == "#FFFFFF"
@@ -551,7 +551,7 @@ async def test_workspace_opens_parquet_as_a_read_only_preview(tmp_path, monkeypa
         rows=[["opened", 1]],
         total_rows=1,
     )
-    monkeypatch.setattr("notebookcli.tui.load_parquet_preview", lambda path: preview)
+    monkeypatch.setattr("notebookvim.tui.load_parquet_preview", lambda path: preview)
     app = NotebookApp(new_notebook(notebook_path), workspace_root=tmp_path)
 
     async with app.run_test(size=(100, 30)):
@@ -900,7 +900,7 @@ async def test_project_open_switches_workspace_without_enumerating_folders(tmp_p
 
     async with app.run_test(size=(100, 30)) as pilot:
         monkeypatch.setattr(
-            "notebookcli.tui.project_directories",
+            "notebookvim.tui.project_directories",
             lambda _root: (_ for _ in ()).throw(AssertionError("folders were enumerated")),
         )
         await pilot.press("colon")
@@ -1023,7 +1023,7 @@ async def test_help_opens_packaged_markdown_in_a_read_only_tab(tmp_path):
         assert app._active_tab.path.name == "HELP.md"
         assert app._active_tab.read_only
         assert app.text_buffer is not None
-        assert "# NotebookCLI Guide" in app.text_buffer.text
+        assert "# NotebookVim Guide" in app.text_buffer.text
         assert ":folder open path" in app.text_buffer.text
         assert ":ai provider ollama" in app.text_buffer.text
         assert app.text_editor is not None
@@ -1317,7 +1317,7 @@ async def test_databricks_connect_configures_notebook_kernel(tmp_path, monkeypat
         host="https://example.cloud.databricks.com",
         user_name="user@example.com",
     )
-    monkeypatch.setattr("notebookcli.tui.connect_databricks", lambda profile: connection)
+    monkeypatch.setattr("notebookvim.tui.connect_databricks", lambda profile: connection)
 
     async with app.run_test(size=(110, 34)) as pilot:
         await submit_command(app, pilot, "databricks connect MyProfile")

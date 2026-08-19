@@ -59,7 +59,7 @@ class GitService:
             raise GitError("Profile names may contain letters, numbers, underscores, and hyphens")
         if profile.provider not in PROVIDERS:
             raise GitError("Provider must be github or azure")
-        prefix = f"nbcli-profile.{profile.name}"
+        prefix = f"notebookvim-profile.{profile.name}"
         for key, value in (
             ("provider", profile.provider),
             ("account", profile.account),
@@ -71,7 +71,7 @@ class GitService:
     def profiles(self) -> list[GitProfile]:
         try:
             output = self._run(
-                "config", "--global", "--get-regexp", r"^nbcli-profile\.", global_config=True
+                "config", "--global", "--get-regexp", r"^notebookvim-profile\.", global_config=True
             )
         except GitError as exc:
             if "Git command failed" in str(exc):
@@ -107,7 +107,7 @@ class GitService:
 
     def use_profile(self, name: str) -> GitProfile:
         profile = self.profile(name)
-        self._run("config", "--local", "nbcli.activeProfile", profile.name)
+        self._run("config", "--local", "notebookvim.activeProfile", profile.name)
         self._run("config", "--local", "user.name", profile.author_name)
         self._run("config", "--local", "user.email", profile.email)
         if profile.provider == "github":
@@ -120,7 +120,7 @@ class GitService:
 
     def active_profile_name(self) -> str | None:
         try:
-            return self._run("config", "--local", "--get", "nbcli.activeProfile") or None
+            return self._run("config", "--local", "--get", "notebookvim.activeProfile") or None
         except GitError:
             return None
 

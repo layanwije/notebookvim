@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from notebookcli.workspace import (
+from notebookvim.workspace import (
     is_parquet_file,
     load_parquet_preview,
     load_text_buffer,

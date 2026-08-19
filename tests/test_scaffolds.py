@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from notebookcli.scaffolds import DATA_ENGINEERING_FILES, init_data_engineering_scaffold
+from notebookvim.scaffolds import DATA_ENGINEERING_FILES, init_data_engineering_scaffold
 
 
 def test_data_engineering_scaffold_creates_expected_files(tmp_path):

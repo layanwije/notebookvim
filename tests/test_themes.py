@@ -1,4 +1,4 @@
-from notebookcli.themes import (
+from notebookvim.themes import (
     APP_THEMES,
     EDITOR_THEMES,
     EDITOR_THEME_NAMES,

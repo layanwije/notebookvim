@@ -1,4 +1,4 @@
-from notebookcli.preferences import (
+from notebookvim.preferences import (
     load_ai_provider,
     load_ai_model,
     load_theme,
@@ -9,7 +9,7 @@ from notebookcli.preferences import (
 
 
 def test_theme_preference_round_trip(tmp_path, monkeypatch):
-    monkeypatch.setenv("NBCLI_CONFIG_HOME", str(tmp_path))
+    monkeypatch.setenv("NOTEBOOKVIM_CONFIG_HOME", str(tmp_path))
     save_theme("snowflake-dark")
 
     assert load_theme() == "snowflake-dark"
@@ -17,7 +17,7 @@ def test_theme_preference_round_trip(tmp_path, monkeypatch):
 
 
 def test_missing_or_invalid_preferences_use_default(tmp_path, monkeypatch):
-    monkeypatch.setenv("NBCLI_CONFIG_HOME", str(tmp_path))
+    monkeypatch.setenv("NOTEBOOKVIM_CONFIG_HOME", str(tmp_path))
     assert load_theme() == "databricks-dark"
 
     preferences_path().write_text("not json", encoding="utf-8")
@@ -25,13 +25,13 @@ def test_missing_or_invalid_preferences_use_default(tmp_path, monkeypatch):
 
 
 def test_old_snowflake_name_migrates_to_light(tmp_path, monkeypatch):
-    monkeypatch.setenv("NBCLI_CONFIG_HOME", str(tmp_path))
+    monkeypatch.setenv("NOTEBOOKVIM_CONFIG_HOME", str(tmp_path))
     preferences_path().write_text('{"theme": "snowflake"}', encoding="utf-8")
     assert load_theme() == "snowflake-light"
 
 
 def test_ai_provider_round_trip_preserves_theme(tmp_path, monkeypatch):
-    monkeypatch.setenv("NBCLI_CONFIG_HOME", str(tmp_path))
+    monkeypatch.setenv("NOTEBOOKVIM_CONFIG_HOME", str(tmp_path))
     save_theme("vscode-dark")
     save_ai_provider("ollama", "qwen2.5-coder:7b")
 

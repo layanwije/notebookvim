@@ -2,7 +2,7 @@ import json
 import signal
 from pathlib import Path
 
-from notebookcli.ai import ClaudeProvider, CodexProvider, OllamaProvider, create_provider
+from notebookvim.ai import ClaudeProvider, CodexProvider, OllamaProvider, create_provider
 
 
 def test_provider_commands_use_safe_non_interactive_modes():
@@ -28,7 +28,7 @@ def test_claude_stream_message_is_normalized():
 
 
 def test_ollama_model_can_be_configured(monkeypatch):
-    monkeypatch.setenv("NBCLI_OLLAMA_MODEL", "qwen2.5-coder")
+    monkeypatch.setenv("NOTEBOOKVIM_OLLAMA_MODEL", "qwen2.5-coder")
     assert OllamaProvider().command("help", Path("/workspace"))[:3] == [
         "ollama", "run", "qwen2.5-coder"
     ]
@@ -60,7 +60,7 @@ def test_provider_cancel_interrupts_running_process(monkeypatch):
 
     provider.process = Process()  # type: ignore[assignment]
     calls = []
-    monkeypatch.setattr("notebookcli.ai.os.killpg", lambda pid, sig: calls.append((pid, sig)))
+    monkeypatch.setattr("notebookvim.ai.os.killpg", lambda pid, sig: calls.append((pid, sig)))
 
     assert provider.cancel() is True
     assert calls == [(123, signal.SIGINT)]

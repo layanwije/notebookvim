@@ -34,7 +34,7 @@ def safe_text(value: object) -> str:
     text = value if isinstance(value, str) else str(value)
     clean = _CONTROL.sub("", _ANSI.sub("", text))
     if len(clean) > MAX_OUTPUT_CHARS:
-        return clean[:MAX_OUTPUT_CHARS] + "\n… output truncated by nbcli …"
+        return clean[:MAX_OUTPUT_CHARS] + "\n… output truncated by notebookvim …"
     return clean
 
 

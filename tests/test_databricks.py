@@ -1,4 +1,4 @@
-from notebookcli.databricks import databricks_kernel_code
+from notebookvim.databricks import databricks_kernel_code
 
 
 def test_databricks_kernel_code_uses_default_authentication():

@@ -2,8 +2,8 @@ import json
 
 import nbformat
 
-from notebookcli.model import CellType, DisplayOutput, StreamOutput
-from notebookcli.storage import load_notebook, new_notebook, save_notebook, to_node
+from notebookvim.model import CellType, DisplayOutput, StreamOutput
+from notebookvim.storage import load_notebook, new_notebook, save_notebook, to_node
 
 
 def test_round_trip_preserves_unknown_metadata_and_outputs(tmp_path):

@@ -85,7 +85,7 @@ class DatabricksRemote:
     def __init__(self, root: Path, client: Any) -> None:
         self.root = Path(root).resolve()
         self.client = client
-        self.state_path = self.root / ".nbcli" / "remotes.json"
+        self.state_path = self.root / ".notebookvim" / "remotes.json"
 
     def mapping(self, local_path: Path) -> RemoteMapping | None:
         raw = self._load_state().get(self._key(local_path))

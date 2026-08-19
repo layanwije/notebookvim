@@ -20,7 +20,7 @@ app = typer.Typer(add_completion=False, no_args_is_help=False,
 
 def version_callback(value: bool) -> None:
     if value:
-        typer.echo(f"notebookcli {__version__}")
+        typer.echo(f"notebookvim {__version__}")
         raise typer.Exit()
 
 
@@ -31,7 +31,7 @@ def root_command(
 ) -> None:
     """A terminal-native notebook and project workspace.
 
-    Run notebookcli without arguments to browse the current project, or pass a
+    Run notebookvim without arguments to browse the current project, or pass a
     directory, notebook, or supported text-file path directly.
     """
 
@@ -114,7 +114,7 @@ def run(
 
 
 def _normalized_cli_args(args: list[str]) -> list[str]:
-    # Preserve the canonical `notebookcli notebook.ipynb` interface while retaining
+    # Preserve the canonical `notebookvim notebook.ipynb` interface while retaining
     # an unambiguous command tree for Typer/Click.
     args = list(args)
     commands = {"new", "info", "run", "open"}
@@ -127,4 +127,4 @@ def _normalized_cli_args(args: list[str]) -> list[str]:
 
 def main() -> None:
     args = _normalized_cli_args(sys.argv[1:])
-    app(args=args, prog_name="notebookcli")
+    app(args=args, prog_name="notebookvim")

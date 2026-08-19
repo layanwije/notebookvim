@@ -1,4 +1,4 @@
-"""Small, dependency-free user preferences for nbcli."""
+"""Small, dependency-free user preferences for notebookvim."""
 
 from __future__ import annotations
 
@@ -12,14 +12,14 @@ DEFAULT_THEME = "databricks-dark"
 
 
 def config_directory() -> Path:
-    override = os.environ.get("NBCLI_CONFIG_HOME")
+    override = os.environ.get("NOTEBOOKVIM_CONFIG_HOME")
     if override:
         return Path(override).expanduser()
     if sys.platform == "darwin":
-        return Path.home() / "Library" / "Application Support" / "nbcli"
+        return Path.home() / "Library" / "Application Support" / "notebookvim"
     if os.name == "nt" and os.environ.get("APPDATA"):
-        return Path(os.environ["APPDATA"]) / "nbcli"
-    return Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "nbcli"
+        return Path(os.environ["APPDATA"]) / "notebookvim"
+    return Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "notebookvim"
 
 
 def preferences_path() -> Path:

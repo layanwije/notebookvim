@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 
-from notebookcli.terminal import TerminalPane, VSCODE_DARK_TERMINAL_THEME, terminal_text
+from notebookvim.terminal import TerminalPane, VSCODE_DARK_TERMINAL_THEME, terminal_text
 
 
 def test_terminal_text_preserves_ansi_colors_and_removes_title_sequence():

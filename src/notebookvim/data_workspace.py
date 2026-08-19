@@ -63,13 +63,13 @@ class SqlDocument:
 
 
 class DuckDBWorkspace:
-    """One in-memory DuckDB connection shared by the current nbcli session."""
+    """One in-memory DuckDB connection shared by the current notebookvim session."""
 
     def __init__(self) -> None:
         try:
             import duckdb
         except ImportError as exc:  # pragma: no cover - dependency/install failure
-            raise RuntimeError("The SQL workspace requires DuckDB. Reinstall nbcli to add it.") from exc
+            raise RuntimeError("The SQL workspace requires DuckDB. Reinstall notebookvim to add it.") from exc
         self._connection = duckdb.connect(":memory:")
         self._lock = threading.Lock()
         self.history: list[str] = []
@@ -124,7 +124,7 @@ class DuckDBWorkspace:
         cleaned = statement.strip().rstrip(";")
         if not cleaned:
             raise ValueError("Run or enter a SQL query before profiling")
-        return self._profile(f"SELECT * FROM ({cleaned}) AS nbcli_profile_source", source, {})
+        return self._profile(f"SELECT * FROM ({cleaned}) AS notebookvim_profile_source", source, {})
 
     def profile_files(self, paths: list[Path], source: str) -> DatasetProfile:
         if not paths:
@@ -141,7 +141,7 @@ class DuckDBWorkspace:
         with self._lock:
             row_count = int(
                 self._connection.execute(
-                    f"SELECT count(*) FROM ({source_sql}) AS nbcli_count_source"
+                    f"SELECT count(*) FROM ({source_sql}) AS notebookvim_count_source"
                 ).fetchone()[0]
             )
             cursor = self._connection.execute(f"SUMMARIZE {source_sql}")
@@ -160,7 +160,7 @@ class DuckDBWorkspace:
                     identifier = _quote_identifier(name)
                     top_rows = self._connection.execute(
                         f"SELECT {identifier}, count(*) AS frequency "
-                        f"FROM ({source_sql}) AS nbcli_top_source "
+                        f"FROM ({source_sql}) AS notebookvim_top_source "
                         f"GROUP BY {identifier} ORDER BY frequency DESC, {identifier} "
                         f"LIMIT {TOP_VALUE_LIMIT}"
                     ).fetchall()

@@ -1,6 +1,6 @@
-# notebookcli
+# NotebookVim
 
-`notebookcli` is a Vim-inspired terminal workspace for Jupyter notebooks and
+`notebookvim` is a Vim-inspired terminal workspace for Jupyter notebooks and
 data engineering projects. Navigate and edit notebooks or source files, run
 cells in a persistent kernel, explore data with local SQL and profiling tools,
 and manage an entire project without leaving the command line. Python and SQL
@@ -18,17 +18,16 @@ makes working with data feel a little more at home in the terminal.
 Install the published package with pip:
 
 ```bash
-python -m pip install notebookcli
+python -m pip install notebookvim
 ```
 
 For an isolated command-line installation, use `pipx`:
 
 ```bash
-pipx install notebookcli
+pipx install notebookvim
 ```
 
-The package installs the `notebookcli` command. The `nbcli` package on PyPI is
-an unrelated NetBox command-line tool.
+The package installs the `notebookvim` command.
 
 ### Development setup
 
@@ -42,14 +41,14 @@ python -m pip install -e '.[dev]'
 
 ```bash
 cd path/to/project
-notebookcli
+notebookvim
 
-notebookcli new experiment.ipynb
-notebookcli experiment.ipynb
-notebookcli path/to/project
+notebookvim new experiment.ipynb
+notebookvim experiment.ipynb
+notebookvim path/to/project
 ```
 
-Opening `notebookcli` without a path starts a project workspace in the current
+Opening `notebookvim` without a path starts a project workspace in the current
 directory. Use `Ctrl+E` to toggle the project tree and `Ctrl+P` to fuzzy-find a
 file. Selecting a notebook or supported UTF-8 text file opens it without leaving
 the application. Python, Markdown, JSON, TOML, YAML, SQL, shell, and other common
@@ -175,7 +174,7 @@ u / Ctrl+R      Undo / redo in Normal mode
 The status bar keeps the essential controls visible: `:` for commands,
 `:help`, `Ctrl+E` for files, `i` to edit, `Ctrl+S` to save, and `Ctrl+Q` to
 exit. Closing the final tab leaves the project browser and command system open
-and shows the Notebook CLI welcome screen. From there, open another file or use
+and shows the NotebookVim welcome screen. From there, open another file or use
 `Esc`, then `:` to enter a command, just as you would return to commands in Vim.
 
 Python text files and Python notebook cells receive local Jedi completions;
@@ -226,7 +225,7 @@ code cell.
 Notebook and kernel commands include `:notebook run all`, `:notebook save`,
 `:kernel info`, `:kernel interrupt`, `:kernel restart`, and `:kernel shutdown`.
 Use `:help` in the application for the complete list. `:q` closes the active
-file/tab—including the final tab—while `:wq` saves and closes it. `:exit` exits notebookcli after the usual
+file/tab—including the final tab—while `:wq` saves and closes it. `:exit` exits notebookvim after the usual
 unsaved-work confirmation. Other short aliases include `:run`,
 `:output clear`, and `:w`.
 
@@ -241,8 +240,8 @@ Create an empty file with `:file new reports/summary.py` or the equivalent
 `:file create reports/summary.py`. You can also right-click a folder in the file
 explorer and enter a filename; right-clicking a file uses its parent folder.
 
-Run `notebookcli` with no argument to start with no project open; use `notebookcli .` to
-open the current folder. Switch projects without leaving notebookcli using `:project open foldername` or its
+Run `notebookvim` with no argument to start with no project open; use `notebookvim .` to
+open the current folder. Switch projects without leaving notebookvim using `:project open foldername` or its
 alias `:folder open foldername`. Both commands complete folders inside the
 current project; you may also type an absolute path or a relative path such as
 `../another-project`. Unsaved files must be saved or closed before switching.
@@ -254,7 +253,7 @@ Initialize a Databricks-oriented medallion project in the current folder with
 starter notebooks alongside `src`, `sql`, and `tests` folders, a README,
 requirements, and a `.gitignore`. Existing files are always preserved, so the
 command is safe to run again.
-file/tab, `:wq` saves and closes it, and `:exit` exits notebookcli after the usual
+file/tab, `:wq` saves and closes it, and `:exit` exits notebookvim after the usual
 unsaved-work confirmation. Other short aliases include `:run`,
 `:output clear`, and `:w`.
 
@@ -292,13 +291,13 @@ document.
 ```
 
 The selected provider and Ollama model are saved in user settings. If the model
-is omitted, `NBCLI_OLLAMA_MODEL` or `llama3.2` is used. Provider runs use safe
+is omitted, `NOTEBOOKVIM_OLLAMA_MODEL` or `llama3.2` is used. Provider runs use safe
 analysis modes: Codex uses a read-only sandbox and Claude Code uses plan mode.
 Ollama receives prompt context without shell or file-editing tools.
 
 ### Databricks
 
-Authenticate with the Databricks CLI, then connect the current notebookcli session:
+Authenticate with the Databricks CLI, then connect the current notebookvim session:
 
 ```text
 :databricks connect
@@ -308,7 +307,7 @@ Authenticate with the Databricks CLI, then connect the current notebookcli sessi
 ```
 
 Passing a workspace URL opens browser-based OAuth, which is the easiest route
-for Databricks Free Edition. With no argument, notebookcli uses default unified
+for Databricks Free Edition. With no argument, notebookvim uses default unified
 authentication; a non-URL argument selects a named Databricks profile.
 
 After connecting, Python notebook cells automatically receive `workspace` (a
@@ -340,7 +339,7 @@ a workspace notebook:
 ```
 
 Supported working-copy formats are `.ipynb`, `.py`, `.sql`, `.scala`, and `.r`.
-Mappings and the last synchronized content hash live under `.nbcli/`, which is
+Mappings and the last synchronized content hash live under `.notebookvim/`, which is
 hidden from the project browser. Jupyter notebooks use the native Jupyter
 workspace format so notebook and cell metadata survive round trips. Source
 notebooks use the matching Databricks language.
@@ -376,7 +375,7 @@ Databricks jobs use the same authenticated connection:
 
 The job and run views show identifiers, state, result, start time, duration,
 parameters, compute ID, and the Databricks run link. A run ID can be omitted
-from logs, cancel, and rerun immediately after `:databricks run`; notebookcli remembers
+from logs, cancel, and rerun immediately after `:databricks run`; notebookvim remembers
 the most recently started run. Follow mode refreshes every two seconds until a
 terminal state is reported.
 
@@ -393,7 +392,7 @@ conversion, job execution, and log retrieval still require a Fabric adapter.
 
 Named Git profiles keep commit identity and provider account selection together.
 Credentials remain in GitHub CLI, Git Credential Manager, or the operating
-system credential store; notebookcli never stores access tokens or passwords.
+system credential store; notebookvim never stores access tokens or passwords.
 
 ```text
 :git profile add personal github layanwije me@example.com "My Name"
@@ -414,9 +413,9 @@ so it does not change the identity of unrelated projects.
 Other commands:
 
 ```bash
-notebookcli run experiment.ipynb
-notebookcli info experiment.ipynb
-notebookcli --help
+notebookvim run experiment.ipynb
+notebookvim info experiment.ipynb
+notebookvim --help
 ```
 
 ## Development

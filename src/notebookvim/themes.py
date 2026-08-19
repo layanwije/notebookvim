@@ -1,4 +1,4 @@
-"""Application, editor, and terminal palettes for nbcli."""
+"""Application, editor, and terminal palettes for notebookvim."""
 
 from __future__ import annotations
 
@@ -304,7 +304,7 @@ def _editor_theme(
 
 EDITOR_THEMES = {
     "vscode-dark": _editor_theme(
-        "nbcli-vscode-dark",
+        "notebookvim-vscode-dark",
         background="#1F1F1F", foreground="#D4D4D4", gutter="#858585",
         active_line="#2A2D2E", selection="#264F78", cursor="#AEAFAD",
         comment="#6A9955", keyword="#C586C0", string="#CE9178",
@@ -312,7 +312,7 @@ EDITOR_THEMES = {
         variable="#9CDCFE", field="#9CDCFE",
     ),
     "vscode-light": _editor_theme(
-        "nbcli-vscode-light",
+        "notebookvim-vscode-light",
         background="#FFFFFF", foreground="#3B3B3B", gutter="#237893",
         active_line="#F5F5F5", selection="#ADD6FF", cursor="#000000",
         comment="#008000", keyword="#0000FF", string="#A31515",
@@ -320,7 +320,7 @@ EDITOR_THEMES = {
         variable="#001080", field="#001080",
     ),
     "databricks-light": _editor_theme(
-        "nbcli-databricks-light",
+        "notebookvim-databricks-light",
         background="#FFFFFF", foreground="#1B3139", gutter="#6B7780",
         active_line="#F5F7F8", selection="#CFE8FA", cursor="#2272B4",
         comment="#587246", keyword="#9C2B80", string="#A31515",
@@ -328,7 +328,7 @@ EDITOR_THEMES = {
         variable="#1B3139", field="#2272B4",
     ),
     "databricks-dark": _editor_theme(
-        "nbcli-databricks-dark",
+        "notebookvim-databricks-dark",
         background="#0B2026", foreground="#E8EFED", gutter="#769098",
         active_line="#14313A", selection="#214E60", cursor="#FF7B6B",
         comment="#8AA29D", keyword="#FF7B6B", string="#A7D8A0",
@@ -336,7 +336,7 @@ EDITOR_THEMES = {
         variable="#E8EFED", field="#8BC8FF",
     ),
     "snowflake-light": _editor_theme(
-        "nbcli-snowflake-light",
+        "notebookvim-snowflake-light",
         background="#FCFEFF", foreground="#172B4D", gutter="#78909C",
         active_line="#F0F8FB", selection="#CDEFFA", cursor="#11567F",
         comment="#5C7A82", keyword="#6F42C1", string="#087F5B",
@@ -344,7 +344,7 @@ EDITOR_THEMES = {
         variable="#172B4D", field="#0B6FA4",
     ),
     "snowflake-dark": _editor_theme(
-        "nbcli-snowflake-dark",
+        "notebookvim-snowflake-dark",
         background="#0D1F29", foreground="#D9EDF4", gutter="#698692",
         active_line="#132C38", selection="#1C5267", cursor="#29B5E8",
         comment="#7097A3", keyword="#C792EA", string="#A8D8A0",
@@ -356,12 +356,12 @@ EDITOR_THEMES = {
 
 EDITOR_THEME_NAMES = {
     "default": "monokai",
-    "vscode-dark": "nbcli-vscode-dark",
-    "vscode-light": "nbcli-vscode-light",
-    "databricks-light": "nbcli-databricks-light",
-    "databricks-dark": "nbcli-databricks-dark",
-    "snowflake-light": "nbcli-snowflake-light",
-    "snowflake-dark": "nbcli-snowflake-dark",
+    "vscode-dark": "notebookvim-vscode-dark",
+    "vscode-light": "notebookvim-vscode-light",
+    "databricks-light": "notebookvim-databricks-light",
+    "databricks-dark": "notebookvim-databricks-dark",
+    "snowflake-light": "notebookvim-snowflake-light",
+    "snowflake-dark": "notebookvim-snowflake-dark",
 }
 
 

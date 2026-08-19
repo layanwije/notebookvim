@@ -1,4 +1,4 @@
-from notebookcli.commands import COMMAND_SUGGESTIONS, normalize_command
+from notebookvim.commands import COMMAND_SUGGESTIONS, normalize_command
 
 
 def test_command_aliases_are_normalized():

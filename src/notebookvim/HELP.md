@@ -1,6 +1,6 @@
-# NotebookCLI Guide
+# NotebookVim Guide
 
-NotebookCLI is a keyboard-driven notebook, code editor, data explorer, terminal,
+NotebookVim is a keyboard-driven notebook, code editor, data explorer, terminal,
 and AI workspace for the command line. It opens Jupyter notebooks and common
 text files without taking you out of the terminal.
 
@@ -10,24 +10,24 @@ This guide is read-only. Scroll with the arrow keys, Page Up/Page Down, `j`/`k`,
 ## Quick start
 
 ```bash
-pipx install notebookcli
+pipx install notebookvim
 cd path/to/project
-notebookcli
+notebookvim
 ```
 
 Useful ways to launch:
 
 ```bash
-notebookcli                         # start without an open project
-notebookcli .                       # open the current folder
-notebookcli path/to/project         # open a folder
-notebookcli analysis.ipynb          # open a notebook
-notebookcli new analysis.ipynb      # create a notebook
-notebookcli run analysis.ipynb      # run every code cell
-notebookcli info analysis.ipynb     # inspect notebook metadata
+notebookvim                         # start without an open project
+notebookvim .                       # open the current folder
+notebookvim path/to/project         # open a folder
+notebookvim analysis.ipynb          # open a notebook
+notebookvim new analysis.ipynb      # create a notebook
+notebookvim run analysis.ipynb      # run every code cell
+notebookvim info analysis.ipynb     # inspect notebook metadata
 ```
 
-Inside NotebookCLI, press `Esc`, then `:` to enter a command. Start with:
+Inside NotebookVim, press `Esc`, then `:` to enter a command. Start with:
 
 ```text
 :folder open path       Open a project folder
@@ -55,7 +55,7 @@ not scan the filesystem for suggestions, so type or paste the desired path.
 | `Ctrl+Shift+Tab` | Previous open tab |
 | `Ctrl+W` | Close the active tab |
 | `Ctrl+S` | Save the active notebook or text file |
-| `Ctrl+Q` | Exit NotebookCLI |
+| `Ctrl+Q` | Exit NotebookVim |
 | `Esc`, then `:` | Open the command line |
 | `Esc`, then `q` | Close the active tab |
 
@@ -155,7 +155,7 @@ inspection pane closes the terminal pane so the document remains usable.
 
 ## AI assistant
 
-NotebookCLI can stream responses from an installed AI command-line tool. The
+NotebookVim can stream responses from an installed AI command-line tool. The
 supported providers are Ollama, OpenAI Codex, and Claude Code.
 
 ```text
@@ -191,7 +191,7 @@ ollama serve
 ollama pull llama3.2
 ```
 
-In NotebookCLI:
+In NotebookVim:
 
 ```text
 :ai provider ollama llama3.2
@@ -216,7 +216,7 @@ curl -fsSL https://chatgpt.com/codex/install.sh | sh
 codex
 ```
 
-Run `codex` once and follow the sign-in flow, then select it in NotebookCLI:
+Run `codex` once and follow the sign-in flow, then select it in NotebookVim:
 
 ```text
 :ai provider codex
@@ -235,7 +235,7 @@ npm install -g @anthropic-ai/claude-code
 claude
 ```
 
-Authenticate on first launch, then select it in NotebookCLI:
+Authenticate on first launch, then select it in NotebookVim:
 
 ```text
 :ai provider claude
@@ -314,7 +314,7 @@ Authenticate with the Databricks CLI first, then connect the current session:
 :databricks rerun
 ```
 
-Remote mappings are stored under `.nbcli/` in the project. Credentials remain
+Remote mappings are stored under `.notebookvim/` in the project. Credentials remain
 in the Databricks configuration or system credential store.
 
 ## Git
@@ -351,16 +351,14 @@ activate it with `:git profile use NAME`.
 :write              Save
 :wq                 Save and close the active tab
 :q                  Close the active tab
-:exit               Exit NotebookCLI
+:exit               Exit NotebookVim
 ```
 
-NotebookCLI warns before replacing, closing, or exiting with unsaved work.
+NotebookVim warns before replacing, closing, or exiting with unsaved work.
 
 ## Troubleshooting
 
-- Run `notebookcli --version` to confirm which executable is active.
-- If `pipx install nbcli` was used, uninstall it; that PyPI package is an
-  unrelated NetBox tool. Install `notebookcli` instead.
+- Run `notebookvim --version` to confirm which executable is active.
 - Run `:ai status` to confirm that an AI provider executable is on `PATH`.
 - For Ollama, verify `ollama list` works and that the selected model is present.
 - If a kernel is stuck, use `:kernel interrupt`, then `:kernel restart`.
