@@ -1,17 +1,18 @@
 # NotebookVim
 
-`notebookvim` is a Vim-inspired terminal workspace for Jupyter notebooks and
-data engineering projects. Navigate and edit notebooks or source files, run
-cells in a persistent kernel, explore data with local SQL and profiling tools,
-and manage an entire project without leaving the command line. Python and SQL
-are supported today, with Scala and R support planned for future releases. The
-workspace also includes an integrated terminal, AI assistance powered by Codex,
-Claude, or Ollama, and connectivity for data platforms such as Databricks, with
-a provider-neutral foundation designed to support platforms such as Microsoft
-Fabric.
+notebookvim is a keyboard-first CLI built for fast, focused development of data projects.
 
-I hope you enjoy this programmer-focused CLI for the world of data—and that it
-makes working with data feel a little more at home in the terminal.
+Designed for developers and data enthusiasts who feel at home in Vim, it brings notebooks, code, data exploration, and project tools together in one streamlined terminal workspace—so you can move from an idea to working code without reaching for the mouse.
+* Vim-inspired editing — Navigate and edit notebooks, Python, SQL, and project files entirely from the keyboard.
+* Interactive execution — Run cells in a persistent kernel and preserve state as you experiment.
+* Built-in data exploration — Query local data with SQL, inspect datasets, and access profiling tools.
+* Databricks connectivity — Connect your local workflow to remote data and compute.
+* Integrated AI — Work with Codex, Claude, or Ollama without interrupting your flow.
+* Full terminal access — Run commands and manage your entire project from the same interface.
+
+Python and SQL are supported today, with Scala and R planned for future releases. A provider-neutral connectivity layer also lays the groundwork for platforms such as Microsoft Fabric.
+
+Whether you are exploring data, prototyping an idea, or building a production pipeline, notebookvim helps you work quickly, stay in flow, and keep your hands on the keyboard.
 
 ## Install
 
