@@ -11,6 +11,7 @@ requires-python = ">=3.9"
 license = { text = "MIT" }
 dependencies = [
   "databricks-sdk>=0.72,<1",
+  "duckdb>=1.1,<2",
   "ipykernel>=6.29,<7",
   "jedi>=0.19,<1",
   "jupyter-client>=8.6,<9",

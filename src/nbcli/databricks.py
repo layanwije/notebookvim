@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Any, Optional
 
 
 @dataclass(frozen=True)
@@ -12,6 +12,7 @@ class DatabricksConnection:
     host: str
     user_name: str
     auth_type: Optional[str] = None
+    client: Any = field(default=None, repr=False, compare=False)
 
 
 def connect_databricks(target: Optional[str] = None) -> DatabricksConnection:
@@ -38,7 +39,21 @@ def connect_databricks(target: Optional[str] = None) -> DatabricksConnection:
         host=client.config.host or "unknown workspace",
         user_name=current_user.user_name or current_user.display_name or "unknown user",
         auth_type=auth_type,
+        client=client,
     )
+
+
+def databricks_client(connection: DatabricksConnection):
+    """Return the authenticated SDK client retained by a connection."""
+    if connection.client is not None:
+        return connection.client
+    from databricks.sdk import WorkspaceClient
+
+    if connection.profile:
+        return WorkspaceClient(profile=connection.profile)
+    if connection.host and connection.auth_type:
+        return WorkspaceClient(host=connection.host, auth_type=connection.auth_type)
+    return WorkspaceClient()
 
 
 def databricks_kernel_code(

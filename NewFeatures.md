@@ -132,6 +132,11 @@ inspect, validate, visualize, and operationalize data without leaving the app.
 
 ### 1. Embedded DuckDB SQL workspace
 
+**Implemented (initial version):** local SQL tabs, syntax highlighting, bounded
+result tables, query timing, history, saved `.sql` queries, query plans, and
+cancellation. Catalog-aware completion and interactive result paging remain
+future refinements.
+
 Open Parquet, CSV, JSON, or DuckDB files and query them directly with SQL.
 
 ```text
@@ -158,6 +163,21 @@ which avoids loading unnecessary rows and columns.
 Reference: [DuckDB Parquet documentation](https://duckdb.org/docs/current/guides/file_formats/query_parquet)
 
 ### 2. Dataset profiler
+
+**Implemented (initial version):** Parquet files and DuckDB query results can be
+profiled in dedicated tabs and exported as JSON. Profiles include shape, types,
+null rates, approximate cardinality, ranges, quartiles, averages, standard
+deviation, common values, semantic-role hints, and Parquet metadata. Richer
+string-pattern and histogram visualizations remain future refinements.
+
+### Parquet and Delta lakehouse inspection
+
+**Implemented:** contextual `:inspect parquet …` and `:inspect delta …`
+commands now expose physical metadata, schemas, partitions, row groups, files,
+Delta transaction history, versions, time-travel snapshots, properties, and
+change data feed information. Delta snapshots are reconstructed from retained
+JSON commits and checkpoints. Profiling is blocked for deletion-vector
+snapshots until a deletion-vector-aware reader is added.
 
 Add a `:profile` command for files, query results, and active dataframes.
 
@@ -466,6 +486,13 @@ Compare this month's schema with the saved baseline.
 - Clear separation between local, development, and production profiles
 
 ### Remote execution
+
+**Implemented for Databricks (initial version):** guarded local working-copy
+synchronization, cell-aware notebook diffs, remote revision detection, optional
+output stripping, conflict resolution, jobs and active-run lists, parameterized
+runs, task outputs, log following, cancellation, and reruns. The same internal
+models are ready for another provider; the Microsoft Fabric API adapter remains
+future work.
 
 - Databricks notebook and job execution
 - Microsoft Fabric notebook execution

@@ -30,3 +30,17 @@ def test_completion_catalog_contains_full_commands_and_aliases():
     assert "git profile add" in COMMAND_SUGGESTIONS
     assert "git status" in COMMAND_SUGGESTIONS
     assert "git push" in COMMAND_SUGGESTIONS
+    assert "databricks sync set" in COMMAND_SUGGESTIONS
+    assert "databricks sync diff" in COMMAND_SUGGESTIONS
+    assert "databricks jobs running" in COMMAND_SUGGESTIONS
+    assert "inspect parquet describe" in COMMAND_SUGGESTIONS
+    assert "inspect delta time travel" in COMMAND_SUGGESTIONS
+
+
+def test_remote_command_arguments_preserve_case():
+    assert normalize_command(":databricks sync set /Workspace/Users/Me/Analysis") == (
+        "databricks sync set /Workspace/Users/Me/Analysis"
+    )
+    assert normalize_command(":databricks run 12 --param Date=2026-08-19") == (
+        "databricks run 12 --param Date=2026-08-19"
+    )
