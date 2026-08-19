@@ -91,8 +91,8 @@ COMMANDS = (
     "git pull",
     "git push",
     "help",
-    "quit",
-    "write quit",
+    "exit",
+    "write close",
 )
 
 
@@ -112,8 +112,9 @@ ALIASES = {
     "w": "notebook save",
     "write": "notebook save",
     "tabs": "tab next",
-    "q": "quit",
-    "wq": "write quit",
+    "q": "tab close",
+    "quit": "tab close",
+    "wq": "write close",
 }
 
 COMMAND_SUGGESTIONS = (*COMMANDS, *ALIASES.keys())
