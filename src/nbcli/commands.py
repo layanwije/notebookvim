@@ -34,7 +34,18 @@ COMMANDS = (
     "files focus",
     "terminal",
     "terminal open",
+    "terminal open side",
+    "terminal open below",
     "terminal close",
+    "databricks connect",
+    "databricks status",
+    "git profile add",
+    "git profile list",
+    "git profile use",
+    "git login",
+    "git status",
+    "git pull",
+    "git push",
     "help",
     "quit",
     "write quit",
@@ -65,7 +76,19 @@ COMMAND_SUGGESTIONS = (*COMMANDS, *ALIASES.keys())
 
 
 def normalize_command(value: str) -> str:
-    command = " ".join(value.strip().lstrip(":").lower().split())
+    original = " ".join(value.strip().lstrip(":").split())
+    profile_connect = re.fullmatch(r"databricks connect(?: (.+))?", original, re.IGNORECASE)
+    if profile_connect:
+        profile = profile_connect.group(1)
+        return "databricks connect" + (f" {profile}" if profile else "")
+    git_arguments = re.fullmatch(
+        r"git (profile (?:add|use)|login)(?: (.+))?", original, re.IGNORECASE
+    )
+    if git_arguments:
+        operation = git_arguments.group(1).lower()
+        arguments = git_arguments.group(2)
+        return f"git {operation}" + (f" {arguments}" if arguments else "")
+    command = original.lower()
     numbered_run = re.fullmatch(r"(?:run cell|cell run) (\d+)", command)
     if numbered_run:
         return f"cell run {numbered_run.group(1)}"

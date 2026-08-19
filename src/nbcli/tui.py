@@ -2,29 +2,36 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import shlex
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from rich.text import Text
+from rich.console import Group
+from rich.table import Table
 from textual import events, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.suggester import Suggester, SuggestFromList
-from textual.widgets import Footer, Header, Input, Static, TextArea, Tree
+from textual.widgets import Footer, Header, Input, Static, Tab, Tabs, TextArea, Tree
 
 from .commands import COMMANDS, COMMAND_SUGGESTIONS, normalize_command
 from .completion import python_completions
+from .databricks import DatabricksConnection, connect_databricks, databricks_kernel_code
 from .kernel import ExecutionUpdate, Kernel
+from .git import GitError, GitProfile, GitService
 from .model import Cell, CellType, Notebook
 from .rendering import render_cell
 from .storage import load_notebook, new_notebook, save_notebook
-from .terminal import TerminalInput, TerminalPane
+from .terminal import TerminalInput, TerminalPane, VSCODE_DARK_TERMINAL_THEME
 from .workspace import (
     TextBuffer,
+    ParquetPreview,
+    is_parquet_file,
     is_supported_text_file,
+    load_parquet_preview,
     load_text_buffer,
     notebook_files,
     project_files,
@@ -45,11 +52,42 @@ class CellView(Static, can_focus=True):
         )
 
 
+class ParquetPreviewView(Static, can_focus=True):
+    def __init__(self, preview: ParquetPreview) -> None:
+        super().__init__(id="parquet-preview")
+        self.preview = preview
+
+    def render(self) -> Group:
+        table = Table(title=f"Top {len(self.preview.rows)} rows of {self.preview.total_rows}")
+        for column in self.preview.columns:
+            table.add_column(column, overflow="ellipsis", max_width=30)
+        for row in self.preview.rows:
+            table.add_row(*("null" if value is None else str(value) for value in row))
+        statistics = Table(title="Summary statistics")
+        statistics.add_column("summary", style="bold")
+        for column in self.preview.statistics_columns:
+            statistics.add_column(column, overflow="ellipsis", max_width=30)
+        for row in self.preview.statistics_rows:
+            statistics.add_row(
+                str(row[0]),
+                *(
+                    "null"
+                    if value is None
+                    else f"{value:.6g}"
+                    if isinstance(value, float)
+                    else str(value)
+                    for value in row[1:]
+                ),
+            )
+        return Group(table, "", statistics)
+
+
 @dataclass
 class DocumentTab:
     path: Path
     notebook: Optional[Notebook] = None
     text_buffer: Optional[TextBuffer] = None
+    parquet_preview: Optional[ParquetPreview] = None
     kernel: Optional[Kernel] = None
     selected: int = 0
     collapsed_outputs: set[str] = field(default_factory=set)
@@ -225,8 +263,16 @@ class ProjectTree(Tree[Path]):
             self.action_select_cursor()
 
 
-class TabBar(Static, can_focus=True):
-    pass
+class TabBar(Tabs):
+    async def _on_tab_clicked(self, event: Tab.Clicked) -> None:
+        await super()._on_tab_clicked(event)
+        if event.tab.id is None:
+            return
+        try:
+            index = int(event.tab.id.removeprefix("document-tab-"))
+        except ValueError:
+            return
+        await self.app._activate_tab(index)  # type: ignore[attr-defined]
 
 
 class NotebookApp(App[None]):
@@ -235,7 +281,7 @@ class NotebookApp(App[None]):
     Screen { background: $surface; }
     #workspace { height: 1fr; }
     #tabs {
-        height: 1; padding: 0 1;
+        height: 2;
         background: $surface-lighten-1; color: $text-muted;
     }
     #files {
@@ -243,15 +289,24 @@ class NotebookApp(App[None]):
         border-right: solid $surface-lighten-2;
         background: $surface-darken-1;
     }
-    #document-column { width: 1fr; height: 100%; }
-    #notebook { height: 1fr; padding: 1 2; }
+    #document-column { width: 1fr; height: 100%; layout: horizontal; }
+    #notebook { width: 1fr; height: 100%; padding: 1 2; }
     #terminal-pane {
-        height: 40%; min-height: 8;
-        border-top: solid $accent;
-        background: $surface-darken-1;
+        width: 45%; min-width: 30; height: 100%; min-height: 8;
+        border-left: solid $surface-lighten-2;
+        background: #181818; color: #cccccc;
     }
-    #terminal-output { height: 1fr; padding: 0 1; }
-    #terminal-input { height: 3; border: tall $accent; padding: 0 1; }
+    #document-column.terminal-below { layout: vertical; }
+    #document-column.terminal-below #notebook { width: 100%; height: 1fr; }
+    #document-column.terminal-below #terminal-pane {
+        width: 100%; min-width: 0; height: 40%;
+        border-left: none; border-top: solid $surface-lighten-2;
+    }
+    #terminal-output { height: 1fr; padding: 0 1; background: #181818; color: #cccccc; }
+    #terminal-input {
+        height: 3; border: tall $surface-lighten-2; padding: 0 1;
+        background: #181818; color: #cccccc;
+    }
     CellView {
         width: 100%; height: auto; min-height: 5;
         margin: 0 0 1 0; padding: 1 2;
@@ -312,6 +367,7 @@ class NotebookApp(App[None]):
         initial_path: Optional[Path] = None,
     ) -> None:
         super().__init__()
+        self.ansi_theme_dark = VSCODE_DARK_TERMINAL_THEME
         self.notebook = notebook
         self.workspace_root = Path(workspace_root or notebook.path.parent).resolve()
         self.initial_path = Path(initial_path).resolve() if initial_path is not None else None
@@ -320,6 +376,7 @@ class NotebookApp(App[None]):
         self.editor: Optional[CellEditor] = None
         self.text_buffer: Optional[TextBuffer] = None
         self.text_editor: Optional[TextArea] = None
+        self.parquet_preview: Optional[ParquetPreview] = None
         self.completion_menu: Optional[Static] = None
         self._completion_revision = 0
         self._completions: list[str] = []
@@ -332,14 +389,18 @@ class NotebookApp(App[None]):
             )
         ]
         self.active_tab_index = 0
+        self._tab_activation_lock = asyncio.Lock()
         self._running_cells: set[int] = set()
         self._collapsed_outputs: set[str] = set()
         self._quit_armed = False
         self.terminal_pane = TerminalPane(self.workspace_root, id="terminal-pane")
+        self.terminal_placement = "side"
+        self.databricks_connection: Optional[DatabricksConnection] = None
+        self.git = GitService(self.workspace_root)
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield TabBar(id="tabs")
+        yield TabBar(Tab(self.notebook.path.name, id="document-tab-0"), id="tabs")
         yield ProjectFileInput(
             [str(path.relative_to(self.workspace_root)) for path in self.project_paths],
             placeholder="Find project file",
@@ -362,6 +423,7 @@ class NotebookApp(App[None]):
         self.query_one("#command", CommandInput).display = False
         self.query_one("#file-picker", ProjectFileInput).display = False
         self.query_one("#terminal-pane", TerminalPane).display = False
+        self.query_one("#document-column", Vertical).add_class("terminal-side")
         self._refresh_tabs()
         self._update_status("IDLE")
         if self.initial_path is not None and self.initial_path != self.notebook.path.resolve():
@@ -383,7 +445,7 @@ class NotebookApp(App[None]):
         return tree
 
     def _update_sub_title(self) -> None:
-        path = self.text_buffer.path if self.text_buffer is not None else self.notebook.path
+        path = self._active_path
         try:
             self.sub_title = str(path.resolve().relative_to(self.workspace_root))
         except ValueError:
@@ -394,14 +456,15 @@ class NotebookApp(App[None]):
         return self.tabs[self.active_tab_index]
 
     def _refresh_tabs(self) -> None:
-        line = Text()
+        tab_bar = self.query_one("#tabs", TabBar)
+        rendered_tabs = list(tab_bar.query(Tab))
         for index, tab in enumerate(self.tabs):
-            if index:
-                line.append(" │ ", style="dim")
             marker = "●" if tab.dirty else ""
-            label = f" {tab.path.name}{marker} "
-            line.append(label, style="reverse bold" if index == self.active_tab_index else "")
-        self.query_one("#tabs", Static).update(line)
+            if index < len(rendered_tabs):
+                rendered_tabs[index].label = f" {tab.path.name}{marker} "
+        active_id = f"document-tab-{self.active_tab_index}"
+        if tab_bar.active != active_id:
+            tab_bar.active = active_id
 
     def _sync_active_tab(self) -> None:
         tab = self._active_tab
@@ -440,6 +503,10 @@ class NotebookApp(App[None]):
         self.run_worker(self._activate_tab(target))
 
     async def _activate_tab(self, index: int, force: bool = False) -> None:
+        async with self._tab_activation_lock:
+            await self._activate_tab_unlocked(index, force)
+
+    async def _activate_tab_unlocked(self, index: int, force: bool = False) -> None:
         if index == self.active_tab_index and not force:
             self._focus_document()
             return
@@ -457,15 +524,25 @@ class NotebookApp(App[None]):
         await notebook_view.remove_children()
         if tab.text_buffer is not None:
             self.text_buffer = tab.text_buffer
+            self.parquet_preview = None
             self.text_editor = await self._mount_text_editor(notebook_view, tab.text_buffer)
             self.text_editor.focus()
+        elif tab.parquet_preview is not None:
+            self.text_buffer = None
+            self.text_editor = None
+            self.parquet_preview = tab.parquet_preview
+            preview = ParquetPreviewView(tab.parquet_preview)
+            await notebook_view.mount(preview)
+            preview.focus()
         else:
             assert tab.notebook is not None
             self.text_buffer = None
             self.text_editor = None
+            self.parquet_preview = None
             self.notebook = tab.notebook
             if tab.kernel is None:
                 tab.kernel = Kernel(self.notebook.kernel_name)
+                self._configure_databricks_kernel(tab.kernel)
             self.kernel = tab.kernel
             self.selected = tab.selected
             self._collapsed_outputs = set(tab.collapsed_outputs)
@@ -480,28 +557,41 @@ class NotebookApp(App[None]):
 
     @property
     def _notebook_active(self) -> bool:
-        return self.text_buffer is None
+        return self._active_tab.notebook is not None
 
     @property
     def _document_dirty(self) -> bool:
-        return self.text_buffer.dirty if self.text_buffer is not None else self.notebook.dirty
+        if self.text_buffer is not None:
+            return self.text_buffer.dirty
+        return bool(self._active_tab.notebook and self.notebook.dirty)
 
     @property
     def _active_path(self) -> Path:
-        return self.text_buffer.path if self.text_buffer is not None else self.notebook.path.resolve()
+        if self.text_buffer is not None:
+            return self.text_buffer.path
+        return self._active_tab.path.resolve()
 
     def _focus_document(self) -> None:
         if self.text_editor is not None:
             self.text_editor.focus()
+        elif self.parquet_preview is not None:
+            self.query_one("#parquet-preview", ParquetPreviewView).focus(scroll_visible=True)
         else:
             self._view(self.selected).focus(scroll_visible=True)
 
-    def action_terminal_open(self) -> None:
+    def action_terminal_open(self, placement: str = "side") -> None:
+        if placement not in {"side", "below"}:
+            placement = "side"
+        document = self.query_one("#document-column", Vertical)
+        document.remove_class("terminal-side", "terminal-below")
+        document.add_class(f"terminal-{placement}")
+        self.terminal_placement = placement
         pane = self.query_one("#terminal-pane", TerminalPane)
         pane.display = True
         pane.query_one("#terminal-input", TerminalInput).focus()
         self.query_one("#status", Static).update(
-            " TERMINAL │ Escape: editor │ Up/Down: history │ Ctrl+L: clear │ Ctrl+C: interrupt"
+            f" TERMINAL {placement.upper()} │ Escape: editor │ Up/Down: history │ "
+            "Ctrl+L: clear │ Ctrl+C: interrupt"
         )
 
     def action_terminal_close(self) -> None:
@@ -560,6 +650,12 @@ class NotebookApp(App[None]):
             dirty = " ●" if self.text_buffer.dirty else ""
             self.query_one("#status", Static).update(
                 f" TEXT │ Ctrl+S: save │ Ctrl+P: find │ {self.text_buffer.path.name}{dirty}"
+            )
+            return
+        if self.parquet_preview is not None:
+            self.query_one("#status", Static).update(
+                f" PARQUET │ Top 25 rows + stats │ Ctrl+P: find │ "
+                f"{self.parquet_preview.path.name}"
             )
             return
         dirty = " ●" if self.notebook.dirty else ""
@@ -640,9 +736,13 @@ class NotebookApp(App[None]):
                     notebook=notebook,
                     kernel=Kernel(notebook.kernel_name),
                 )
+                self._configure_databricks_kernel(tab.kernel)
             elif is_supported_text_file(path):
                 buffer = load_text_buffer(path)
                 tab = DocumentTab(path=path, text_buffer=buffer)
+            elif is_parquet_file(path):
+                preview = await asyncio.to_thread(load_parquet_preview, path)
+                tab = DocumentTab(path=path, parquet_preview=preview)
             else:
                 self.notify(f"Unsupported file type: {path.name}", severity="warning")
                 return
@@ -652,6 +752,9 @@ class NotebookApp(App[None]):
         if new_tab:
             self.tabs.append(tab)
             target = len(self.tabs) - 1
+            await self.query_one("#tabs", TabBar).add_tab(
+                Tab(path.name, id=f"document-tab-{target}")
+            )
             await self._activate_tab(target)
         else:
             self._sync_active_tab()
@@ -1052,10 +1155,19 @@ class NotebookApp(App[None]):
             self.action_previous_tab()
         elif command == "files focus":
             self.action_toggle_file_focus()
-        elif command in {"terminal", "terminal open"}:
-            self.action_terminal_open()
+        elif command in {"terminal", "terminal open", "terminal open side"}:
+            self.action_terminal_open("side")
+        elif command == "terminal open below":
+            self.action_terminal_open("below")
         elif command == "terminal close":
             self.action_terminal_close()
+        elif command == "databricks connect" or command.startswith("databricks connect "):
+            profile = command.removeprefix("databricks connect").strip() or None
+            await self._connect_databricks(profile)
+        elif command == "databricks status":
+            self._show_databricks_status()
+        elif command.startswith("git "):
+            await self._dispatch_git_command(command)
         elif command == "help":
             self.notify("\n".join(f":{item}" for item in COMMANDS), title="Commands", timeout=15)
         elif command == "quit":
@@ -1072,6 +1184,117 @@ class NotebookApp(App[None]):
                     self.exit()
         elif command:
             self.notify(f"Unknown command: {command}", severity="warning")
+
+    async def _dispatch_git_command(self, command: str) -> None:
+        try:
+            arguments = shlex.split(command)
+        except ValueError as exc:
+            self.notify(str(exc), title="Git command", severity="error")
+            return
+        try:
+            if arguments[:3] == ["git", "profile", "add"]:
+                if len(arguments) < 8:
+                    raise GitError(
+                        "Usage: :git profile add NAME PROVIDER ACCOUNT EMAIL AUTHOR_NAME"
+                    )
+                profile = GitProfile(
+                    name=arguments[3],
+                    provider=arguments[4].lower(),
+                    account=arguments[5],
+                    email=arguments[6],
+                    author_name=" ".join(arguments[7:]),
+                )
+                await asyncio.to_thread(self.git.add_profile, profile)
+                self.notify(f"Saved Git profile {profile.name}", title="Git")
+            elif arguments[:3] == ["git", "profile", "list"]:
+                profiles = await asyncio.to_thread(self.git.profiles)
+                active = await asyncio.to_thread(self.git.active_profile_name)
+                if not profiles:
+                    self.notify("No Git profiles configured", title="Git profiles")
+                    return
+                lines = [
+                    f"{'●' if item.name == active else ' '} {item.name} · "
+                    f"{item.provider} · {item.account} · {item.email}"
+                    for item in profiles
+                ]
+                self.notify("\n".join(lines), title="Git profiles", timeout=15)
+            elif arguments[:3] == ["git", "profile", "use"] and len(arguments) == 4:
+                profile = await asyncio.to_thread(self.git.use_profile, arguments[3])
+                self.notify(
+                    f"Using {profile.name} · {profile.account}\n"
+                    f"Commits: {profile.author_name} <{profile.email}>",
+                    title="Git profile",
+                )
+            elif arguments[:2] == ["git", "login"] and len(arguments) == 3:
+                login = await asyncio.to_thread(self.git.login_command, arguments[2])
+                self.action_terminal_open("side")
+                self.terminal_pane.run_command(login)
+            elif arguments == ["git", "status"]:
+                output = await asyncio.to_thread(self.git.status)
+                self.notify(output, title="Git status", timeout=15)
+            elif arguments == ["git", "pull"]:
+                output = await asyncio.to_thread(self.git.pull)
+                self.notify(output, title="Git pull", timeout=15)
+            elif arguments == ["git", "push"]:
+                output = await asyncio.to_thread(self.git.push)
+                self.notify(output, title="Git push", timeout=15)
+            else:
+                raise GitError(
+                    "Use :git profile add/list/use, :git login PROFILE, "
+                    ":git status, :git pull, or :git push"
+                )
+        except GitError as exc:
+            self.notify(str(exc), title="Git", severity="error", timeout=15)
+
+    def _configure_databricks_kernel(self, kernel: Optional[Kernel]) -> None:
+        if kernel is None or self.databricks_connection is None:
+            return
+        kernel.set_initialization_code(
+            databricks_kernel_code(
+                self.databricks_connection.profile,
+                self.databricks_connection.host,
+                self.databricks_connection.auth_type,
+            )
+        )
+
+    async def _connect_databricks(self, profile: Optional[str]) -> None:
+        target_label = profile or "default authentication"
+        self.notify(f"Connecting with {target_label}…", title="Databricks")
+        try:
+            connection = await asyncio.to_thread(connect_databricks, profile)
+        except Exception as exc:
+            self.notify(
+                f"{exc}\nConfigure authentication with `databricks auth login` and try again.",
+                title="Databricks connection failed",
+                severity="error",
+                timeout=15,
+            )
+            return
+        self.databricks_connection = connection
+        kernels = {id(tab.kernel): tab.kernel for tab in self.tabs if tab.kernel is not None}
+        kernels[id(self.kernel)] = self.kernel
+        for kernel in kernels.values():
+            self._configure_databricks_kernel(kernel)
+        self.notify(
+            f"{connection.user_name} · {connection.host}\n"
+            "Python cells now include `workspace` and `dbutils`.",
+            title="Databricks connected",
+            timeout=12,
+        )
+
+    def _show_databricks_status(self) -> None:
+        connection = self.databricks_connection
+        if connection is None:
+            self.notify(
+                "Not connected. Use :databricks connect [profile].",
+                title="Databricks",
+            )
+            return
+        profile = connection.profile or connection.auth_type or "default authentication"
+        self.notify(
+            f"{connection.user_name} · {connection.host}\nProfile: {profile}",
+            title="Databricks connected",
+        )
 
     @work(exclusive=False)
     async def action_run_cell(self, advance: bool = False) -> None:
@@ -1119,6 +1342,9 @@ class NotebookApp(App[None]):
         self._save()
 
     def _save(self) -> bool:
+        if self.parquet_preview is not None:
+            self.notify("Parquet previews are read-only")
+            return True
         if self.text_buffer is not None:
             if self.text_editor is not None:
                 self.text_buffer.text = self.text_editor.text

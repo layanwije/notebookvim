@@ -3,11 +3,13 @@ from pathlib import Path
 
 import pytest
 
+from nbcli.workspace import ParquetPreview
 from nbcli.kernel import ExecutionUpdate
+from nbcli.databricks import DatabricksConnection
 from nbcli.model import Cell, CellType, ExecutionState, Notebook, StreamOutput
 from nbcli.storage import new_notebook, save_notebook
 from nbcli.terminal import TerminalInput, TerminalPane
-from nbcli.tui import NotebookApp
+from nbcli.tui import NotebookApp, TabBar
 
 
 @pytest.mark.asyncio
@@ -285,6 +287,29 @@ async def test_workspace_does_not_discard_dirty_notebook(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_workspace_opens_parquet_as_a_read_only_preview(tmp_path, monkeypatch):
+    notebook_path = tmp_path / "notes.ipynb"
+    parquet_path = tmp_path / "events.parquet"
+    save_notebook(new_notebook(notebook_path))
+    parquet_path.write_bytes(b"placeholder")
+    preview = ParquetPreview(
+        path=parquet_path.resolve(),
+        columns=["event", "count"],
+        rows=[["opened", 1]],
+        total_rows=1,
+    )
+    monkeypatch.setattr("nbcli.tui.load_parquet_preview", lambda path: preview)
+    app = NotebookApp(new_notebook(notebook_path), workspace_root=tmp_path)
+
+    async with app.run_test(size=(100, 30)):
+        await app._open_project_file(parquet_path)
+
+        assert app.parquet_preview == preview
+        assert app.query_one("#parquet-preview").preview.rows == [["opened", 1]]
+        assert "PARQUET" in str(app.query_one("#status").render())
+
+
+@pytest.mark.asyncio
 async def test_workspace_opens_edits_and_saves_python_file(tmp_path):
     notebook_path = tmp_path / "notes.ipynb"
     python_path = tmp_path / "helpers.py"
@@ -433,6 +458,26 @@ async def test_file_browser_opens_tabs_and_shortcuts_switch_focus_and_tabs(tmp_p
         await pilot.press("shift+tab")
         await app.workers.wait_for_complete()
         assert app._active_path == notebook_path.resolve()
+
+
+@pytest.mark.asyncio
+async def test_workspace_supports_many_open_file_tabs(tmp_path):
+    notebook_path = tmp_path / "notes.ipynb"
+    save_notebook(new_notebook(notebook_path))
+    text_paths = [tmp_path / f"file-{index}.py" for index in range(6)]
+    for index, path in enumerate(text_paths):
+        path.write_text(f"value = {index}\n", encoding="utf-8")
+    app = NotebookApp(new_notebook(notebook_path), workspace_root=tmp_path)
+
+    async with app.run_test(size=(55, 26)):
+        for path in text_paths:
+            await app._open_project_file(path, new_tab=True)
+
+        tab_bar = app.query_one("#tabs", TabBar)
+        assert len(app.tabs) == 7
+        assert tab_bar.tab_count == 7
+        assert tab_bar.active == "document-tab-6"
+        assert app._active_path == text_paths[-1].resolve()
 
 
 @pytest.mark.asyncio
@@ -594,6 +639,8 @@ async def test_terminal_commands_open_run_and_close_split(tmp_path):
         terminal_input = pane.query_one("#terminal-input", TerminalInput)
         assert pane.display
         assert terminal_input.has_focus
+        assert app.terminal_placement == "side"
+        assert app.query_one("#document-column").has_class("terminal-side")
 
         terminal_input.value = "printf terminal-ok"
         await pilot.press("enter")
@@ -604,3 +651,43 @@ async def test_terminal_commands_open_run_and_close_split(tmp_path):
         await submit_command(app, pilot, "terminal close")
         assert not pane.display
         assert app._view(app.selected).has_focus
+
+
+@pytest.mark.asyncio
+async def test_terminal_can_open_below_and_return_to_default_side(tmp_path):
+    notebook_path = tmp_path / "notes.ipynb"
+    save_notebook(new_notebook(notebook_path))
+    app = NotebookApp(new_notebook(notebook_path), workspace_root=tmp_path)
+
+    async with app.run_test(size=(110, 34)) as pilot:
+        document = app.query_one("#document-column")
+        await submit_command(app, pilot, "terminal open below")
+        assert app.terminal_placement == "below"
+        assert document.has_class("terminal-below")
+
+        await pilot.press("escape")
+        await submit_command(app, pilot, "terminal")
+        assert app.terminal_placement == "side"
+        assert document.has_class("terminal-side")
+        assert not document.has_class("terminal-below")
+
+
+@pytest.mark.asyncio
+async def test_databricks_connect_configures_notebook_kernel(tmp_path, monkeypatch):
+    notebook_path = tmp_path / "notes.ipynb"
+    save_notebook(new_notebook(notebook_path))
+    app = NotebookApp(new_notebook(notebook_path), workspace_root=tmp_path)
+    connection = DatabricksConnection(
+        profile="MyProfile",
+        host="https://example.cloud.databricks.com",
+        user_name="user@example.com",
+    )
+    monkeypatch.setattr("nbcli.tui.connect_databricks", lambda profile: connection)
+
+    async with app.run_test(size=(110, 34)) as pilot:
+        await submit_command(app, pilot, "databricks connect MyProfile")
+
+        assert app.databricks_connection == connection
+        assert app.kernel.initialization_code is not None
+        assert "WorkspaceClient(profile='MyProfile')" in app.kernel.initialization_code
+        assert "dbutils = workspace.dbutils" in app.kernel.initialization_code

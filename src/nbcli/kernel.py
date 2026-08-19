@@ -73,6 +73,8 @@ class Kernel:
         self.manager: Optional[AsyncKernelManager] = None
         self.client = None
         self._execute_lock = asyncio.Lock()
+        self.initialization_code: Optional[str] = None
+        self._initialized = False
 
     @property
     def alive(self) -> bool:
@@ -93,9 +95,39 @@ class Kernel:
             raise
         self.manager, self.client = manager, client
 
+    def set_initialization_code(self, code: Optional[str]) -> None:
+        self.initialization_code = code
+        self._initialized = False
+
+    async def _initialize(self) -> None:
+        if self._initialized or not self.initialization_code:
+            return
+        assert self.client is not None
+        message_id = self.client.execute(
+            self.initialization_code,
+            silent=True,
+            store_history=False,
+            allow_stdin=False,
+            stop_on_error=True,
+        )
+        error = None
+        while True:
+            message = await self.client.get_iopub_msg(timeout=self.timeout)
+            if message.get("parent_header", {}).get("msg_id") != message_id:
+                continue
+            content = message.get("content", {})
+            if message.get("msg_type") == "error":
+                error = f"{content.get('ename', 'Error')}: {content.get('evalue', '')}"
+            if message.get("msg_type") == "status" and content.get("execution_state") == "idle":
+                break
+        if error:
+            raise RuntimeError(f"Kernel initialization failed: {error}")
+        self._initialized = True
+
     async def execute(self, cell: Cell, update: UpdateCallback) -> bool:
         async with self._execute_lock:
             await self.start()
+            await self._initialize()
             assert self.client is not None
             cell.outputs.clear()
             cell.execution_state = ExecutionState.RUNNING
@@ -154,6 +186,7 @@ class Kernel:
         await self.manager.restart_kernel(now=True)
         assert self.client is not None
         await self.client.wait_for_ready(timeout=30)
+        self._initialized = False
 
     async def shutdown(self) -> None:
         if self.manager is None:
@@ -163,3 +196,4 @@ class Kernel:
         await self.manager.shutdown_kernel(now=True)
         self.manager = None
         self.client = None
+        self._initialized = False

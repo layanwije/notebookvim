@@ -32,6 +32,11 @@ quit from the text editor. Generated
 directories such as `.git`, `.venv`, `node_modules`, and `__pycache__` are
 hidden from the navigator.
 
+Selecting a `.parquet`, `.parq`, or `.pq` file opens a read-only preview of its
+first 25 rows followed by Spark-style `count`, `mean`, `stddev`, `min`, and
+`max` summary statistics. Statistics are calculated directly with PyArrow;
+Spark is not started.
+
 Project editing shortcuts:
 
 ```text
@@ -73,12 +78,68 @@ Notebook and kernel commands include `:notebook run all`, `:notebook save`,
 Use `:help` in the application for the complete list. Short aliases such as
 `:run`, `:output clear`, `:w`, `:q`, and `:wq` are also supported.
 
-Open a workspace terminal beneath the active document with `:terminal` or
-`:terminal open`; hide it with `:terminal close`. The terminal keeps its current
+Open a workspace terminal beside the active document with `:terminal`,
+`:terminal open`, or `:terminal open side`. Use `:terminal open below` for a
+lower split and hide either layout with `:terminal close`. The terminal keeps its current
 directory and command history while hidden. Use Up/Down for history, Ctrl+L to
 clear its output, Ctrl+C to interrupt a running command, and Escape to return
-focus to the editor. It is a lightweight command shell for builds, tests, and
+focus to the editor. It uses a VS Code-style dark terminal background,
+foreground, and 16-color ANSI palette. It is a lightweight command shell for builds, tests, and
 project commands; full-screen interactive terminal programs are not supported.
+Commands run through the configured macOS login shell in interactive mode, so
+normal shell startup files and aliases are loaded. ANSI and true-color output
+is preserved inside the terminal frame.
+
+### Databricks
+
+Authenticate with the Databricks CLI, then connect the current nbcli session:
+
+```text
+:databricks connect
+:databricks connect MyProfile
+:databricks connect https://your-workspace.cloud.databricks.com
+:databricks status
+```
+
+Passing a workspace URL opens browser-based OAuth, which is the easiest route
+for Databricks Free Edition. With no argument, nbcli uses default unified
+authentication; a non-URL argument selects a named Databricks profile.
+
+After connecting, Python notebook cells automatically receive `workspace` (a
+Databricks `WorkspaceClient`) and `dbutils`. Local use of `dbutils` supports the
+utility groups exposed by the Databricks SDK, including `fs`, `secrets`,
+`widgets`, and `jobs`. For example:
+
+```python
+for item in dbutils.fs.ls("/"):
+    print(item.path)
+```
+
+Credentials remain in the standard Databricks authentication configuration and
+are not written into notebook files. This connection provides workspace
+utilities; notebook cells still execute in the local Python kernel.
+
+### Git profiles
+
+Named Git profiles keep commit identity and provider account selection together.
+Credentials remain in GitHub CLI, Git Credential Manager, or the operating
+system credential store; nbcli never stores access tokens or passwords.
+
+```text
+:git profile add personal github laivw me@example.com "My Name"
+:git profile add work azure me@company.com me@company.com "My Name"
+:git profile list
+:git profile use personal
+:git login personal
+:git status
+:git pull
+:git push
+```
+
+GitHub browser login requires `gh` or Git Credential Manager. Azure DevOps
+browser login requires Git Credential Manager and uses Microsoft OAuth. Profile
+selection writes the profile's author name and email to the current repository,
+so it does not change the identity of unrelated projects.
 
 Other commands:
 

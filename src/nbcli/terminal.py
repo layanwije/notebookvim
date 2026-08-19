@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import os
+import pty
+import re
 import shlex
 import signal
 from pathlib import Path
 from typing import Optional
 
 from rich.text import Text
+from rich.terminal_theme import TerminalTheme
 from textual import work
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -17,6 +21,42 @@ from textual.containers import Vertical
 from textual.widgets import Input, RichLog
 
 from .rendering import safe_text
+
+
+_OSC_SEQUENCE = re.compile(r"\x1b\].*?(?:\x07|\x1b\\)")
+
+# The familiar palette used by VS Code's integrated terminal in its default
+# dark appearance. True-color escape sequences continue to use their exact RGB.
+VSCODE_DARK_TERMINAL_THEME = TerminalTheme(
+    background=(24, 24, 24),
+    foreground=(204, 204, 204),
+    normal=[
+        (0, 0, 0),
+        (205, 49, 49),
+        (13, 188, 121),
+        (229, 229, 16),
+        (36, 114, 200),
+        (188, 63, 188),
+        (17, 168, 205),
+        (229, 229, 229),
+    ],
+    bright=[
+        (102, 102, 102),
+        (241, 76, 76),
+        (35, 209, 139),
+        (245, 245, 67),
+        (59, 142, 234),
+        (214, 112, 214),
+        (41, 184, 219),
+        (229, 229, 229),
+    ],
+)
+
+
+def terminal_text(value: str, style: str = "") -> Text:
+    """Render shell ANSI colors while discarding terminal title sequences."""
+    sanitized = _OSC_SEQUENCE.sub("", value).replace("\r", "")
+    return Text.from_ansi(sanitized, style=style, no_wrap=False)
 
 
 class TerminalInput(Input):
@@ -59,6 +99,7 @@ class TerminalPane(Vertical):
         self.history: list[str] = []
         self.history_index = 0
         self.process: Optional[asyncio.subprocess.Process] = None
+        self.master_fd: Optional[int] = None
         self.transcript: list[str] = []
 
     def compose(self) -> ComposeResult:
@@ -75,7 +116,7 @@ class TerminalPane(Vertical):
     def _write(self, value: str, style: str = "") -> None:
         clean = safe_text(value)
         self.transcript.append(clean)
-        self.query_one("#terminal-output", RichLog).write(Text(clean, style=style))
+        self.query_one("#terminal-output", RichLog).write(terminal_text(value, style))
 
     def clear(self) -> None:
         self.transcript.clear()
@@ -146,25 +187,47 @@ class TerminalPane(Vertical):
         terminal_input = self.query_one("#terminal-input", TerminalInput)
         terminal_input.placeholder = f"{self.cwd}  running…  (Ctrl+C to interrupt)"
         shell = os.environ.get("SHELL") or "/bin/sh"
+        master_fd, slave_fd = pty.openpty()
+        self.master_fd = master_fd
+        environment = os.environ.copy()
+        environment.setdefault("TERM", "xterm-256color")
+        environment.setdefault("COLORTERM", "truecolor")
+        environment.setdefault("CLICOLOR", "1")
         try:
             self.process = await asyncio.create_subprocess_exec(
                 shell,
-                "-lc",
+                "-lic",
                 command,
                 cwd=str(self.cwd),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
+                stdin=slave_fd,
+                stdout=slave_fd,
+                stderr=slave_fd,
+                env=environment,
                 start_new_session=True,
             )
-            assert self.process.stdout is not None
-            while line := await self.process.stdout.readline():
-                self._write(line.decode("utf-8", errors="replace").rstrip("\n"))
+            os.close(slave_fd)
+            slave_fd = -1
+            while True:
+                try:
+                    chunk = await asyncio.to_thread(os.read, master_fd, 4096)
+                except OSError as exc:
+                    if exc.errno == errno.EIO:
+                        break
+                    raise
+                if not chunk:
+                    break
+                self._write(chunk.decode("utf-8", errors="replace").rstrip("\n"))
             return_code = await self.process.wait()
             if return_code:
                 self._write(f"exit {return_code}", "red")
         except Exception as exc:
             self._write(str(exc), "red")
         finally:
+            if slave_fd >= 0:
+                os.close(slave_fd)
+            if self.master_fd is not None:
+                os.close(self.master_fd)
+                self.master_fd = None
             self.process = None
             self._update_prompt()
             if self.display:

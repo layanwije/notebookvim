@@ -1,6 +1,10 @@
+from pathlib import Path
+
 import pytest
 
 from nbcli.workspace import (
+    is_parquet_file,
+    load_parquet_preview,
     load_text_buffer,
     notebook_files,
     project_files,
@@ -43,3 +47,43 @@ def test_text_buffer_rejects_binary_files(tmp_path):
 
     with pytest.raises(ValueError, match="binary"):
         load_text_buffer(path)
+
+
+def test_parquet_extensions_are_recognized():
+    assert is_parquet_file(Path("data.parquet"))
+    assert is_parquet_file(Path("data.PQ"))
+    assert not is_parquet_file(Path("data.csv"))
+
+
+def test_parquet_preview_explains_html_downloads(tmp_path):
+    path = tmp_path / "sample.parquet"
+    path.write_text("<!DOCTYPE html><title>GitHub</title>", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="HTML page.*Raw file"):
+        load_parquet_preview(path)
+
+
+def test_parquet_preview_includes_spark_style_statistics(tmp_path):
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
+    path = tmp_path / "sample.parquet"
+    pq.write_table(
+        pa.table(
+            {
+                "value": [1, 2, 3, None],
+                "label": ["beta", "alpha", None, "gamma"],
+            }
+        ),
+        path,
+    )
+
+    preview = load_parquet_preview(path)
+
+    assert preview.statistics_columns == ["value", "label"]
+    statistics = {row[0]: row[1:] for row in preview.statistics_rows}
+    assert statistics["count"] == [3, 3]
+    assert statistics["mean"] == [2.0, None]
+    assert statistics["stddev"][0] == pytest.approx(1.0)
+    assert statistics["stddev"][1] is None
+    assert statistics["min"] == [1, "alpha"]
+    assert statistics["max"] == [3, "gamma"]
