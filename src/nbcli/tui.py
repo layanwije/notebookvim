@@ -795,7 +795,7 @@ class NotebookApp(App[None]):
         dock: bottom; height: 3; border: tall $accent; padding: 0 1;
     }
     #command-suggestions {
-        dock: bottom; width: 100%; height: auto; max-height: 9;
+        dock: bottom; width: 100%; height: auto; max-height: 7;
         border: round $accent; background: $panel;
     }
     #file-picker {

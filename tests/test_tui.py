@@ -770,6 +770,11 @@ async def test_command_dropdown_completes_theme_options_and_relative_project_fil
             "theme snowflake-dark",
         ]
         assert app.query_one("#command-suggestions").display
+        dropdown = app.query_one("#command-suggestions")
+        await pilot.press("down", "down", "down", "down", "down", "down")
+        await pilot.pause()
+        assert dropdown.highlighted == 6
+        assert dropdown.scroll_offset.y > 0
 
         command.value = "file open reports/S"
         await pilot.pause()
