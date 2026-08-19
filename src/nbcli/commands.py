@@ -28,6 +28,7 @@ COMMANDS = (
     "kernel interrupt",
     "kernel restart",
     "kernel shutdown",
+    "file open",
     "tab open",
     "tab next",
     "tab previous",
@@ -72,7 +73,9 @@ COMMANDS = (
     "theme vscode-dark",
     "theme vscode-light",
     "theme databricks-light",
-    "theme snowflake",
+    "theme databricks-dark",
+    "theme snowflake-light",
+    "theme snowflake-dark",
     "databricks connect",
     "databricks status",
     "databricks sync set",
@@ -128,6 +131,11 @@ COMMAND_SUGGESTIONS = (*COMMANDS, *ALIASES.keys())
 
 def normalize_command(value: str) -> str:
     original = " ".join(value.strip().lstrip(":").split())
+    file_open = re.fullmatch(r"(file open|tab open)(?: (.+))?", original, re.IGNORECASE)
+    if file_open:
+        operation = file_open.group(1).lower()
+        path = file_open.group(2)
+        return operation + (f" {path}" if path else "")
     profile_connect = re.fullmatch(r"databricks connect(?: (.+))?", original, re.IGNORECASE)
     if profile_connect:
         profile = profile_connect.group(1)

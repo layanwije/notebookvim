@@ -12,7 +12,7 @@ from nbcli.workspace import (
 )
 
 
-def test_project_files_are_sorted_and_ignore_generated_directories(tmp_path):
+def test_project_files_are_sorted_include_hidden_and_ignore_generated_directories(tmp_path):
     (tmp_path / "notebooks").mkdir()
     (tmp_path / "notebooks" / "analysis.ipynb").write_text("{}", encoding="utf-8")
     (tmp_path / "README.md").write_text("notes", encoding="utf-8")
@@ -22,8 +22,11 @@ def test_project_files_are_sorted_and_ignore_generated_directories(tmp_path):
 
     relative = [path.relative_to(tmp_path) for path in project_files(tmp_path)]
 
-    assert relative == [tmp_path.joinpath("notebooks/analysis.ipynb").relative_to(tmp_path),
-                        tmp_path.joinpath("README.md").relative_to(tmp_path)]
+    assert relative == [
+        tmp_path.joinpath(".hidden").relative_to(tmp_path),
+        tmp_path.joinpath("notebooks/analysis.ipynb").relative_to(tmp_path),
+        tmp_path.joinpath("README.md").relative_to(tmp_path),
+    ]
     assert notebook_files(tmp_path) == [tmp_path / "notebooks" / "analysis.ipynb"]
 
 

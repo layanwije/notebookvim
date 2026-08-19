@@ -215,12 +215,12 @@ def save_text_buffer(buffer: TextBuffer) -> None:
 
 
 def project_files(root: Path) -> list[Path]:
-    """Return visible project files in a stable, searchable order."""
+    """Return project files, including dotfiles, in a stable searchable order."""
     root = Path(root).resolve()
     files: list[Path] = []
     for path in root.rglob("*"):
         relative = path.relative_to(root)
-        if any(part in IGNORED_DIRECTORIES or part.startswith(".") for part in relative.parts):
+        if any(part in IGNORED_DIRECTORIES for part in relative.parts):
             continue
         if path.is_file():
             files.append(path)

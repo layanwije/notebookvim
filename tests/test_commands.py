@@ -12,6 +12,8 @@ def test_command_aliases_are_normalized():
     assert normalize_command(":exit") == "exit"
     assert normalize_command(":run cell 2") == "cell run 2"
     assert normalize_command(":cell run 12") == "cell run 12"
+    assert normalize_command(":file open Reports/My File.py") == "file open Reports/My File.py"
+    assert normalize_command(":tab open Reports/My File.py") == "tab open Reports/My File.py"
     assert normalize_command(":databricks connect MyProfile") == "databricks connect MyProfile"
     assert normalize_command(":git profile use Work") == "git profile use Work"
     assert normalize_command(
@@ -42,7 +44,10 @@ def test_completion_catalog_contains_full_commands_and_aliases():
     assert "theme default" in COMMAND_SUGGESTIONS
     assert "theme vscode-dark" in COMMAND_SUGGESTIONS
     assert "theme databricks-light" in COMMAND_SUGGESTIONS
-    assert "theme snowflake" in COMMAND_SUGGESTIONS
+    assert "theme databricks-dark" in COMMAND_SUGGESTIONS
+    assert "theme snowflake-light" in COMMAND_SUGGESTIONS
+    assert "theme snowflake-dark" in COMMAND_SUGGESTIONS
+    assert "file open" in COMMAND_SUGGESTIONS
 
 
 def test_remote_command_arguments_preserve_case():

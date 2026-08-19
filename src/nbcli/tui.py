@@ -17,7 +17,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, ScrollableContainer, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.suggester import Suggester, SuggestFromList
-from textual.widgets import Footer, Header, Input, Static, Tab, Tabs, TextArea, Tree
+from textual.widgets import Footer, Header, Input, OptionList, Static, Tab, Tabs, TextArea, Tree
 
 from .commands import COMMANDS, COMMAND_SUGGESTIONS, normalize_command
 from .completion import python_completions
@@ -32,16 +32,18 @@ from .kernel import ExecutionUpdate, Kernel
 from .lakehouse import InspectionError, InspectionReport, LakehouseInspector, find_delta_root
 from .git import GitError, GitProfile, GitService
 from .model import Cell, CellType, Notebook
+from .preferences import load_theme, save_theme
 from .rendering import render_cell
 from .remote import DatabricksRemote, RemoteError, RemoteReport, SyncStatus
 from .storage import load_notebook, new_notebook, save_notebook, to_node
-from .terminal import TerminalInput, TerminalPane, VSCODE_DARK_TERMINAL_THEME
+from .terminal import TerminalInput, TerminalPane
 from .themes import (
     APP_THEMES,
     EDITOR_THEMES,
     EDITOR_THEME_NAMES,
     RICH_SYNTAX_THEMES,
     TERMINAL_THEMES,
+    THEME_FONTS,
     THEME_NAMES,
 )
 from .workspace import (
@@ -70,6 +72,17 @@ class CellView(Static, can_focus=True):
             self.index,
             show_output=not self.output_collapsed,
             syntax_theme=getattr(self.app, "syntax_theme", "ansi_dark"),
+        )
+
+
+class EmptyWorkspace(Static, can_focus=True):
+    def __init__(self) -> None:
+        super().__init__(
+            "[bold]Notebook CLI[/bold]\n"
+            "Vim-like experience for the World of Data\n\n"
+            "Press [bold]Esc[/bold], then [bold]:[/bold] for commands\n"
+            "Use [bold]:help[/bold] for the command reference",
+            id="empty-workspace",
         )
 
 
@@ -524,6 +537,8 @@ class SqlEditor(TextArea):
 class CommandInput(Input):
     BINDINGS = [
         Binding("escape", "cancel_command", "Cancel", priority=True),
+        Binding("up", "previous_option", "Previous option", show=False, priority=True),
+        Binding("down", "next_option", "Next option", show=False, priority=True),
         Binding("tab", "accept_suggestion", "Complete", priority=True),
     ]
 
@@ -541,9 +556,13 @@ class CommandInput(Input):
             self._suggestion = COMMAND_SUGGESTIONS[0]
 
     def action_accept_suggestion(self) -> None:
-        if self._suggestion:
-            self.value = self._suggestion
-            self.cursor_position = len(self.value)
+        self.app._accept_command_option()  # type: ignore[attr-defined]
+
+    def action_previous_option(self) -> None:
+        self.app._move_command_option(-1)  # type: ignore[attr-defined]
+
+    def action_next_option(self) -> None:
+        self.app._move_command_option(1)  # type: ignore[attr-defined]
 
 
 class FuzzyFileSuggester(Suggester):
@@ -705,6 +724,10 @@ class NotebookApp(App[None]):
     }
     #document-column { width: 1fr; height: 100%; layout: horizontal; }
     #notebook { width: 1fr; height: 100%; padding: 1 2; }
+    #empty-workspace {
+        width: 100%; height: 100%;
+        content-align: center middle; text-align: center; color: $text-muted;
+    }
     #terminal-pane {
         width: 45%; min-width: 30; height: 100%; min-height: 8;
         border-left: solid $surface-lighten-2;
@@ -771,6 +794,10 @@ class NotebookApp(App[None]):
     #command {
         dock: bottom; height: 3; border: tall $accent; padding: 0 1;
     }
+    #command-suggestions {
+        dock: bottom; width: 100%; height: auto; max-height: 9;
+        border: round $accent; background: $panel;
+    }
     #file-picker {
         dock: top; height: 3; border: tall $accent; padding: 0 1;
     }
@@ -801,11 +828,13 @@ class NotebookApp(App[None]):
         super().__init__()
         for app_theme in APP_THEMES.values():
             self.register_theme(app_theme)
-        self._nbcli_theme = "default"
-        self.syntax_theme = RICH_SYNTAX_THEMES["default"]
-        self.theme = "default"
-        self.ansi_theme_dark = VSCODE_DARK_TERMINAL_THEME
-        self.ansi_theme_light = TERMINAL_THEMES["default"]
+        saved_theme = load_theme()
+        self._nbcli_theme = saved_theme if saved_theme in THEME_NAMES else "default"
+        self.syntax_theme = RICH_SYNTAX_THEMES[self._nbcli_theme]
+        self.theme = self._nbcli_theme
+        terminal_theme = TERMINAL_THEMES[self._nbcli_theme]
+        self.ansi_theme_dark = terminal_theme
+        self.ansi_theme_light = terminal_theme
         self.notebook = notebook
         self.workspace_root = Path(workspace_root or notebook.path.parent).resolve()
         self.initial_path = Path(initial_path).resolve() if initial_path is not None else None
@@ -823,6 +852,7 @@ class NotebookApp(App[None]):
         self.completion_menu: Optional[Static] = None
         self._completion_revision = 0
         self._completions: list[str] = []
+        self._command_option_values: list[str] = []
         self.kernel = Kernel(notebook.kernel_name)
         self.tabs = [
             DocumentTab(
@@ -869,6 +899,7 @@ class NotebookApp(App[None]):
                 yield self.terminal_pane
                 yield self.inspection_pane
         yield Static(id="status")
+        yield OptionList(id="command-suggestions", compact=True)
         yield CommandInput(placeholder="Command", id="command")
         yield Footer()
 
@@ -876,6 +907,7 @@ class NotebookApp(App[None]):
         self._update_sub_title()
         self._select(0)
         self.query_one("#command", CommandInput).display = False
+        self.query_one("#command-suggestions", OptionList).display = False
         self.query_one("#file-picker", ProjectFileInput).display = False
         self.query_one("#terminal-pane", TerminalPane).display = False
         self.query_one("#inspection-pane", InspectionPane).display = False
@@ -906,12 +938,24 @@ class NotebookApp(App[None]):
         self.ansi_theme_dark = terminal_theme
         self.ansi_theme_light = terminal_theme
         self.theme = normalized
+        palette = APP_THEMES[normalized].variables
+        status = self.query_one("#status", Static)
+        status.styles.background = palette["status-background"]
+        status.styles.color = palette["status-foreground"]
         for editor in self.query(TextArea):
             self._configure_editor_theme(editor)
         for view in self.query(CellView):
             view.refresh(layout=True)
         self.terminal_pane.refresh(layout=True)
-        self.notify(f"Theme: {normalized}", title="Appearance")
+        try:
+            save_theme(normalized)
+        except OSError as exc:
+            self.notify(f"Theme changed, but preference could not be saved: {exc}", severity="warning")
+        self.notify(
+            f"Theme: {normalized}\nFont: {THEME_FONTS[normalized]} "
+            "(configure in terminal profile)",
+            title="Appearance",
+        )
 
     def _project_tree(self) -> ProjectTree:
         tree = ProjectTree(self.workspace_root.name, self.workspace_root, id="files")
@@ -919,16 +963,28 @@ class NotebookApp(App[None]):
         return tree
 
     def _populate_project_tree(self, tree: ProjectTree) -> None:
-        nodes = {Path(): tree.root}
+        structure = {"directories": {}, "files": []}
         for file_path in self.project_paths:
             relative = file_path.relative_to(self.workspace_root)
-            current = Path()
+            current = structure
             for part in relative.parts[:-1]:
-                parent = nodes[current]
-                current /= part
-                if current not in nodes:
-                    nodes[current] = parent.add(part, self.workspace_root / current)
-            nodes[current].add_leaf(relative.name, file_path)
+                directories = current["directories"]
+                if part not in directories:
+                    directories[part] = {"directories": {}, "files": []}
+                current = directories[part]
+            current["files"].append(file_path)
+
+        def add_children(parent: Tree.Node[Path], branch: dict, relative: Path) -> None:
+            for name in sorted(branch["directories"], key=str.lower):
+                child_relative = relative / name
+                child = parent.add(name, self.workspace_root / child_relative)
+                add_children(child, branch["directories"][name], child_relative)
+            for file_path in sorted(
+                branch["files"], key=lambda path: path.name.lower()
+            ):
+                parent.add_leaf(file_path.name, file_path)
+
+        add_children(tree.root, structure, Path())
         tree.root.expand()
 
     def _refresh_project_files(self) -> None:
@@ -946,6 +1002,9 @@ class NotebookApp(App[None]):
         picker._suggestion = None
 
     def _update_sub_title(self) -> None:
+        if not self.tabs:
+            self.sub_title = "No file open"
+            return
         path = self._active_path
         try:
             self.sub_title = str(path.resolve().relative_to(self.workspace_root))
@@ -958,6 +1017,8 @@ class NotebookApp(App[None]):
 
     def _refresh_tabs(self) -> None:
         tab_bar = self.query_one("#tabs", TabBar)
+        if not self.tabs:
+            return
         rendered_tabs = list(tab_bar.query(Tab))
         for index, tab in enumerate(self.tabs):
             marker = "●" if tab.dirty else ""
@@ -968,6 +1029,8 @@ class NotebookApp(App[None]):
             tab_bar.active = active_id
 
     def _sync_active_tab(self) -> None:
+        if not self.tabs:
+            return
         tab = self._active_tab
         if tab.sql_document is not None and self.sql_editor is not None:
             tab.sql_document.query = self.sql_editor.text
@@ -999,8 +1062,7 @@ class NotebookApp(App[None]):
 
     async def _close_active_tab(self) -> None:
         async with self._tab_activation_lock:
-            if len(self.tabs) == 1:
-                self.notify("The last tab cannot be closed", severity="warning")
+            if not self.tabs:
                 return
             if self._running_cells:
                 self.notify("Wait for execution to finish before closing this tab", severity="warning")
@@ -1024,6 +1086,10 @@ class NotebookApp(App[None]):
             self.active_tab_index = min(closing_index, len(self.tabs) - 1)
             tab_bar = self.query_one("#tabs", TabBar)
             await tab_bar.clear()
+            if not self.tabs:
+                self.active_tab_index = -1
+                await self._show_empty_workspace()
+                return
             for index, tab in enumerate(self.tabs):
                 await tab_bar.add_tab(Tab(tab.display_name, id=f"document-tab-{index}"))
             await self._activate_tab_unlocked(self.active_tab_index, force=True)
@@ -1047,6 +1113,8 @@ class NotebookApp(App[None]):
             await self._activate_tab_unlocked(index, force)
 
     async def _activate_tab_unlocked(self, index: int, force: bool = False) -> None:
+        if not 0 <= index < len(self.tabs):
+            return
         if index == self.active_tab_index and not force:
             self._focus_document()
             return
@@ -1141,21 +1209,29 @@ class NotebookApp(App[None]):
 
     @property
     def _notebook_active(self) -> bool:
-        return self._active_tab.notebook is not None
+        return bool(self.tabs and self._active_tab.notebook is not None)
 
     @property
     def _document_dirty(self) -> bool:
+        if not self.tabs:
+            return False
         if self.text_buffer is not None:
             return self.text_buffer.dirty
         return bool(self._active_tab.notebook and self.notebook.dirty)
 
     @property
     def _active_path(self) -> Path:
+        if not self.tabs:
+            return self.workspace_root
         if self.text_buffer is not None:
             return self.text_buffer.path
         return self._active_tab.path.resolve()
 
     def _focus_document(self) -> None:
+        if not self.tabs:
+            empty = self.query_one("#empty-workspace", EmptyWorkspace)
+            empty.focus()
+            return
         if self.text_editor is not None:
             self.text_editor.focus()
         elif self.sql_editor is not None:
@@ -1170,6 +1246,24 @@ class NotebookApp(App[None]):
             self.query_one("#parquet-preview", ParquetPreviewView).focus(scroll_visible=True)
         else:
             self._view(self.selected).focus(scroll_visible=True)
+
+    async def _show_empty_workspace(self) -> None:
+        notebook_view = self.query_one("#notebook", VerticalScroll)
+        await notebook_view.remove_children()
+        self.text_buffer = None
+        self.text_editor = None
+        self.parquet_preview = None
+        self.sql_document = None
+        self.sql_editor = None
+        self.dataset_profile = None
+        self.remote_report = None
+        self.inspection_report = None
+        self.editor = None
+        empty = EmptyWorkspace()
+        await notebook_view.mount(empty)
+        self.sub_title = "No file open"
+        empty.focus()
+        self._update_status()
 
     def action_terminal_open(self, placement: str = "side") -> None:
         if placement not in {"side", "below"}:
@@ -1266,56 +1360,44 @@ class NotebookApp(App[None]):
 
     def _update_status(self, kernel_state: Optional[str] = None) -> None:
         self._refresh_tabs()
+        if not self.tabs:
+            self.query_one("#status", Static).update(self._shortcut_status("READY"))
+            return
         if self.text_buffer is not None:
-            dirty = " ●" if self.text_buffer.dirty else ""
             mode = (
                 self.text_editor.vim_mode.upper()
                 if isinstance(self.text_editor, TextFileEditor)
                 else "NORMAL"
             )
-            self.query_one("#status", Static).update(
-                f" {mode} TEXT │ Ctrl+S: save │ Ctrl+P: find │ "
-                f"{self.text_buffer.path.name}{dirty}"
-            )
+            self.query_one("#status", Static).update(self._shortcut_status(f"{mode} TEXT"))
             return
         if self.parquet_preview is not None:
-            self.query_one("#status", Static).update(
-                f" PARQUET │ Top 25 rows + stats │ Ctrl+P: find │ "
-                f"{self.parquet_preview.path.name}"
-            )
+            self.query_one("#status", Static).update(self._shortcut_status("PARQUET"))
             return
         if self.sql_document is not None:
-            self.query_one("#status", Static).update(
-                f" SQL │ :sql run · :sql explain · :profile │ {self.sql_document.name}"
-            )
+            self.query_one("#status", Static).update(self._shortcut_status("SQL"))
             return
         if self.dataset_profile is not None:
-            self.query_one("#status", Static).update(
-                " PROFILE │ :profile save exports JSON │ Ctrl+P: find"
-            )
+            self.query_one("#status", Static).update(self._shortcut_status("PROFILE"))
             return
         if self.remote_report is not None:
-            self.query_one("#status", Static).update(
-                " DATABRICKS │ :databricks jobs · logs · cancel · rerun │ Ctrl+W: close"
-            )
+            self.query_one("#status", Static).update(self._shortcut_status("DATABRICKS"))
             return
         if self.inspection_report is not None:
-            self.query_one("#status", Static).update(
-                " INSPECT │ metadata only · source remains unchanged │ Ctrl+W: close"
-            )
+            self.query_one("#status", Static).update(self._shortcut_status("INSPECT"))
             return
         if self.editor is not None:
             mode = self.editor.vim_mode.upper()
-            self.query_one("#status", Static).update(
-                f" {mode} CELL │ Cell {self.selected + 1}/{len(self.notebook.cells)} "
-                "│ Esc: cell Normal / notebook Normal │ Tab: complete"
-            )
+            self.query_one("#status", Static).update(self._shortcut_status(f"{mode} CELL"))
             return
-        dirty = " ●" if self.notebook.dirty else ""
-        state = kernel_state or ("BUSY" if self._running_cells else "IDLE")
-        text = (f" NORMAL │ {self.notebook.kernel_name} · {state} │ "
-                f"Cell {self.selected + 1}/{len(self.notebook.cells)} │ {self.notebook.path.name}{dirty}")
-        self.query_one("#status", Static).update(text)
+        self.query_one("#status", Static).update(self._shortcut_status("NORMAL"))
+
+    @staticmethod
+    def _shortcut_status(mode: str) -> str:
+        return (
+            f" {mode} │ : cmd │ :help │ Ctrl+B files │ i edit │ "
+            "Ctrl+S save │ Ctrl+Q exit"
+        )
 
     def action_toggle_files(self) -> None:
         if self.editor is not None:
@@ -1358,6 +1440,25 @@ class NotebookApp(App[None]):
 
     def open_project_file_in_tab(self, path: Path) -> None:
         self.run_worker(self._open_project_file(path, new_tab=True))
+
+    async def _open_file_from_command(self, relative_path: str, new_tab: bool = False) -> None:
+        relative_path = relative_path.strip()
+        if (
+            len(relative_path) >= 2
+            and relative_path[0] == relative_path[-1]
+            and relative_path[0] in {"'", '"'}
+        ):
+            relative_path = relative_path[1:-1]
+        path = (self.workspace_root / relative_path).resolve()
+        try:
+            path.relative_to(self.workspace_root)
+        except ValueError:
+            self.notify("Use a path inside the current project", severity="warning")
+            return
+        if not path.is_file():
+            self.notify(f"File not found: {relative_path}", severity="warning")
+            return
+        await self._open_project_file(path, new_tab=new_tab)
 
     async def _open_project_file(self, path: Path, new_tab: bool = False) -> None:
         path = path.resolve()
@@ -1402,7 +1503,14 @@ class NotebookApp(App[None]):
         except Exception as exc:
             self.notify(str(exc), title="Open failed", severity="error")
             return
-        if new_tab:
+        if not self.tabs:
+            self.tabs.append(tab)
+            self.active_tab_index = 0
+            await self.query_one("#tabs", TabBar).add_tab(
+                Tab(path.name, id="document-tab-0")
+            )
+            await self._activate_tab(0, force=True)
+        elif new_tab:
             self.tabs.append(tab)
             target = len(self.tabs) - 1
             await self.query_one("#tabs", TabBar).add_tab(
@@ -1572,6 +1680,8 @@ class NotebookApp(App[None]):
         self.notify(f"Saved {path.name}", title="Dataset profile")
 
     def _inspection_source_path(self) -> Path:
+        if not self.tabs:
+            raise InspectionError("Open a Parquet file before using :inspect")
         if self.parquet_preview is not None:
             return self.parquet_preview.path
         path = self._active_tab.path
@@ -2314,8 +2424,20 @@ class NotebookApp(App[None]):
             and self.text_editor.has_focus
             and self.text_editor.vim_mode == "insert"
         )
-        if self.editor is not None or text_in_insert:
+        if text_in_insert:
             return
+        if self.editor is not None:
+            if self.editor.vim_mode == "insert":
+                return
+            self.run_worker(self._finish_edit_then_command())
+            return
+        self._show_command()
+
+    async def _finish_edit_then_command(self) -> None:
+        await self._finish_edit()
+        self._show_command()
+
+    def _show_command(self) -> None:
         command = self.query_one("#command", CommandInput)
         suggestions = self._contextual_command_suggestions()
         inspection_prefix = self._inspection_completion_prefix()
@@ -2323,6 +2445,7 @@ class NotebookApp(App[None]):
         command.value = ""
         command.display = True
         command.focus()
+        self._update_command_options("")
         self.call_after_refresh(
             lambda: setattr(command, "_suggestion", inspection_prefix or suggestions[0])
             if command.display and not command.value
@@ -2332,10 +2455,73 @@ class NotebookApp(App[None]):
             " COMMAND │ Tab: complete │ :help lists commands │ Escape: cancel"
         )
 
+    def _command_option_candidates(self, value: str) -> list[str]:
+        typed = value.strip().lstrip(":")
+        folded = typed.casefold()
+        for operation in ("file open", "tab open"):
+            if folded == operation or folded.startswith(f"{operation} "):
+                partial = typed[len(operation):].strip().casefold()
+                candidates = [
+                    f"{operation} {path.relative_to(self.workspace_root)}"
+                    for path in self.project_paths
+                    if not partial
+                    or str(path.relative_to(self.workspace_root)).casefold().startswith(partial)
+                ]
+                return candidates[:80]
+        suggestions = self._contextual_command_suggestions()
+        return [
+            suggestion for suggestion in suggestions
+            if suggestion.casefold().startswith(folded)
+            and suggestion.casefold() != folded
+        ][:80]
+
+    def _update_command_options(self, value: str) -> None:
+        options = self._command_option_candidates(value)
+        self._command_option_values = options
+        dropdown = self.query_one("#command-suggestions", OptionList)
+        dropdown.set_options(options)
+        dropdown.display = bool(options)
+        command = self.query_one("#command", CommandInput)
+        inspection_prefix = self._inspection_completion_prefix()
+        if value.strip().lstrip(":").casefold() == "inspect" and inspection_prefix:
+            command._suggestion = inspection_prefix
+        else:
+            command._suggestion = options[0] if options else ""
+
+    def _move_command_option(self, offset: int) -> None:
+        if not self._command_option_values:
+            return
+        dropdown = self.query_one("#command-suggestions", OptionList)
+        current = dropdown.highlighted if dropdown.highlighted is not None else 0
+        dropdown.highlighted = (current + offset) % len(self._command_option_values)
+
+    def _accept_command_option(self, index: Optional[int] = None) -> None:
+        if not self._command_option_values:
+            return
+        dropdown = self.query_one("#command-suggestions", OptionList)
+        selected = index if index is not None else dropdown.highlighted
+        command = self.query_one("#command", CommandInput)
+        if selected is None and command._suggestion:
+            value = command._suggestion
+        else:
+            value = self._command_option_values[selected if selected is not None else 0]
+        command.value = value
+        command.cursor_position = len(value)
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "command":
+            self._update_command_options(event.value)
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        if event.option_list.id == "command-suggestions":
+            self._accept_command_option(event.option_index)
+
     def close_command(self) -> None:
         command = self.query_one("#command", CommandInput)
         command.value = ""
         command.display = False
+        self.query_one("#command-suggestions", OptionList).display = False
+        self._command_option_values = []
         self._focus_document()
         self._update_status()
 
@@ -2416,6 +2602,14 @@ class NotebookApp(App[None]):
             self.action_restart_kernel()
         elif command == "kernel shutdown":
             self.action_shutdown_kernel()
+        elif command.startswith("file open "):
+            await self._open_file_from_command(command.removeprefix("file open "))
+        elif command == "file open":
+            self.notify("Use :file open relative/path/to/file", severity="warning")
+        elif command.startswith("tab open "):
+            await self._open_file_from_command(
+                command.removeprefix("tab open "), new_tab=True
+            )
         elif command == "tab open":
             self.action_open_selected_in_tab()
         elif command == "tab next":
@@ -2456,7 +2650,9 @@ class NotebookApp(App[None]):
             await self._dispatch_inspect_command(command)
         elif command == "theme":
             self.notify(
-                f"Current: {self._nbcli_theme}\nAvailable: {', '.join(THEME_NAMES)}",
+                f"Current: {self._nbcli_theme}\n"
+                f"Recommended font: {THEME_FONTS[self._nbcli_theme]}\n"
+                f"Available: {', '.join(THEME_NAMES)}",
                 title="Theme",
             )
         elif command.startswith("theme "):
@@ -2655,6 +2851,9 @@ class NotebookApp(App[None]):
         self._save()
 
     def _save(self) -> bool:
+        if not self.tabs:
+            self.notify("There is no open file to save")
+            return True
         if self.parquet_preview is not None:
             self.notify("Parquet previews are read-only")
             return True

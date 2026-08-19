@@ -7,14 +7,16 @@ from nbcli.workspace import ParquetPreview
 from nbcli.kernel import ExecutionUpdate
 from nbcli.databricks import DatabricksConnection
 from nbcli.model import Cell, CellType, ExecutionState, Notebook, StreamOutput
+from nbcli.preferences import load_theme, save_theme
 from nbcli.remote import RemoteMapping, SyncStatus
 from nbcli.storage import load_notebook, new_notebook, save_notebook
 from nbcli.terminal import TerminalInput, TerminalPane
-from nbcli.tui import InspectionModal, NotebookApp, TabBar
+from nbcli.tui import EmptyWorkspace, InspectionModal, NotebookApp, TabBar
 
 
 @pytest.mark.asyncio
-async def test_navigation_and_editing():
+async def test_navigation_and_editing(tmp_path, monkeypatch):
+    monkeypatch.setenv("NBCLI_CONFIG_HOME", str(tmp_path / "config"))
     notebook = Notebook(
         path=Path("example.ipynb"),
         cells=[
@@ -88,7 +90,8 @@ async def test_notebook_vim_normal_mode_cell_operations():
 
 
 @pytest.mark.asyncio
-async def test_app_themes_switch_chrome_editor_and_syntax_palette():
+async def test_app_themes_switch_chrome_editor_and_syntax_palette(tmp_path, monkeypatch):
+    monkeypatch.setenv("NBCLI_CONFIG_HOME", str(tmp_path / "config"))
     notebook = Notebook(
         path=Path("example.ipynb"),
         cells=[Cell(CellType.CODE, "value = 1", cell_id="cell0001")],
@@ -100,22 +103,46 @@ async def test_app_themes_switch_chrome_editor_and_syntax_palette():
         assert app.syntax_theme == "ansi_dark"
 
         for name in (
-            "vscode-dark", "vscode-light", "databricks-light", "snowflake"
+            "vscode-dark", "vscode-light", "databricks-light", "databricks-dark",
+            "snowflake-light", "snowflake-dark",
         ):
             await app._dispatch_command(f"theme {name}")
             await pilot.pause()
             assert app.theme == name
             assert app._nbcli_theme == name
+            if name in {"vscode-light", "databricks-light", "snowflake-light"}:
+                status = app.query_one("#status")
+                assert status.styles.color.hex == "#FFFFFF"
+                assert status.styles.background.hex != status.styles.color.hex
 
-        assert not app.current_theme.dark
+        assert app.current_theme.dark
         await pilot.press("enter")
         assert app.editor is not None
-        assert app.editor.theme == "nbcli-snowflake"
+        assert app.editor.theme == "nbcli-snowflake-dark"
 
         await app._dispatch_command("theme default")
         assert app.editor is not None
         assert app.editor.theme == "monokai"
         assert app.current_theme.dark
+        assert load_theme() == "default"
+
+
+@pytest.mark.asyncio
+async def test_saved_theme_is_restored_on_startup(tmp_path, monkeypatch):
+    monkeypatch.setenv("NBCLI_CONFIG_HOME", str(tmp_path / "config"))
+    save_theme("databricks-light")
+    notebook = Notebook(
+        path=Path("example.ipynb"),
+        cells=[Cell(CellType.CODE, "value = 1", cell_id="cell0001")],
+    )
+    app = NotebookApp(notebook)
+
+    assert app.theme == "databricks-light"
+    assert app._nbcli_theme == "databricks-light"
+    async with app.run_test(size=(100, 32)):
+        status = app.query_one("#status")
+        assert status.styles.color.hex == "#FFFFFF"
+        assert status.styles.background.hex == "#1B3139"
 
 
 @pytest.mark.asyncio
@@ -702,6 +729,63 @@ async def test_workspace_supports_many_open_file_tabs(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_file_explorer_places_folders_before_files_and_includes_dotfiles(tmp_path):
+    folder = tmp_path / "z-folder"
+    folder.mkdir()
+    (folder / "nested.py").write_text("value = 1\n", encoding="utf-8")
+    (tmp_path / ".env").write_text("MODE=local\n", encoding="utf-8")
+    (tmp_path / "a-file.py").write_text("value = 2\n", encoding="utf-8")
+    notebook_path = tmp_path / "notes.ipynb"
+    save_notebook(new_notebook(notebook_path))
+    app = NotebookApp(new_notebook(notebook_path), workspace_root=tmp_path)
+
+    async with app.run_test(size=(100, 30)):
+        tree = app.query_one("#files")
+        labels = [str(node.label) for node in tree.root.children]
+        assert labels == ["z-folder", ".env", "a-file.py", "notes.ipynb"]
+
+
+@pytest.mark.asyncio
+async def test_command_dropdown_completes_theme_options_and_relative_project_files(tmp_path):
+    nested = tmp_path / "reports"
+    nested.mkdir()
+    report = nested / "Sales Report.py"
+    report.write_text("total = 42\n", encoding="utf-8")
+    notebook_path = tmp_path / "notes.ipynb"
+    save_notebook(new_notebook(notebook_path))
+    app = NotebookApp(new_notebook(notebook_path), workspace_root=tmp_path)
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.press("colon")
+        command = app.query_one("#command")
+        command.value = "theme"
+        await pilot.pause()
+        assert app._command_option_values == [
+            "theme default",
+            "theme vscode-dark",
+            "theme vscode-light",
+            "theme databricks-light",
+            "theme databricks-dark",
+            "theme snowflake-light",
+            "theme snowflake-dark",
+        ]
+        assert app.query_one("#command-suggestions").display
+
+        command.value = "file open reports/S"
+        await pilot.pause()
+        assert app._command_option_values == ["file open reports/Sales Report.py"]
+        await pilot.press("tab")
+        assert command.value == "file open reports/Sales Report.py"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app._active_path == report.resolve()
+
+        await submit_command(app, pilot, "tab open notes.ipynb")
+        assert len(app.tabs) == 2
+        assert app._active_path == notebook_path.resolve()
+
+
+@pytest.mark.asyncio
 async def test_tab_close_activates_neighbor_and_reindexes_tabs(tmp_path):
     notebook_path = tmp_path / "notes.ipynb"
     first = tmp_path / "first.py"
@@ -729,6 +813,52 @@ async def test_tab_close_activates_neighbor_and_reindexes_tabs(tmp_path):
         await submit_command(app, pilot, "tab close")
         assert len(app.tabs) == 1
         assert app._active_path == notebook_path.resolve()
+
+
+@pytest.mark.asyncio
+async def test_last_tab_closes_to_welcome_and_files_can_be_reopened(tmp_path):
+    notebook_path = tmp_path / "notes.ipynb"
+    python_path = tmp_path / "analysis.py"
+    save_notebook(new_notebook(notebook_path))
+    python_path.write_text("answer = 42\n", encoding="utf-8")
+    app = NotebookApp(new_notebook(notebook_path), workspace_root=tmp_path)
+
+    async with app.run_test(size=(100, 30)):
+        await app._close_active_tab()
+
+        assert app.tabs == []
+        assert app.active_tab_index == -1
+        assert app.query_one("#tabs", TabBar).tab_count == 0
+        welcome = app.query_one("#empty-workspace", EmptyWorkspace)
+        assert "Vim-like experience for the World of Data" in str(welcome.render())
+        assert "Esc" in str(welcome.render())
+        status = str(app.query_one("#status").render())
+        for shortcut in (": cmd", ":help", "Ctrl+B", "i edit", "Ctrl+S", "Ctrl+Q"):
+            assert shortcut in status
+
+        await app._open_project_file(python_path)
+        assert len(app.tabs) == 1
+        assert app.active_tab_index == 0
+        assert app._active_path == python_path.resolve()
+        assert app.query_one("#tabs", TabBar).tab_count == 1
+
+
+@pytest.mark.asyncio
+async def test_escape_then_colon_opens_commands_from_notebook_cell_normal_mode():
+    notebook = Notebook(
+        path=Path("example.ipynb"),
+        cells=[Cell(CellType.CODE, "value = 1", cell_id="cell0001")],
+    )
+    app = NotebookApp(notebook)
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.press("enter", "i", "escape", "colon")
+        await app.workers.wait_for_complete()
+
+        assert app.editor is None
+        command = app.query_one("#command")
+        assert command.display
+        assert command.has_focus
 
 
 @pytest.mark.asyncio
