@@ -9,6 +9,9 @@ description = "A terminal-native interactive notebook"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { file = "LICENSE" }
+authors = [
+  { name = "Layan Wijegunaratne" },
+]
 keywords = ["cli", "jupyter", "notebook", "terminal", "tui"]
 classifiers = [
   "Development Status :: 3 - Alpha",
@@ -49,9 +52,9 @@ dev = [
 notebookcli = "notebookcli.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/laivw/notebookcli"
-Issues = "https://github.com/laivw/notebookcli/issues"
-Repository = "https://github.com/laivw/notebookcli.git"
+Homepage = "https://github.com/layanwije/notebookcli"
+Issues = "https://github.com/layanwije/notebookcli/issues"
+Repository = "https://github.com/layanwije/notebookcli.git"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/notebookcli"]

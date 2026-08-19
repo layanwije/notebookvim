@@ -396,7 +396,7 @@ Credentials remain in GitHub CLI, Git Credential Manager, or the operating
 system credential store; notebookcli never stores access tokens or passwords.
 
 ```text
-:git profile add personal github laivw me@example.com "My Name"
+:git profile add personal github layanwije me@example.com "My Name"
 :git profile add work azure me@company.com me@company.com "My Name"
 :git profile list
 :git profile use personal
