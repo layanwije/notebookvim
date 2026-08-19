@@ -155,35 +155,6 @@ Python text files and Python notebook cells receive local Jedi completions;
 press `Tab` to accept a displayed completion. Markdown and other supported text
 files retain syntax highlighting without Python completions.
 
-Switch the entire interface palette at runtime with `:theme NAME`. The theme
-updates application chrome, notebook cells, editors, syntax colors, selections,
-overlays, tables, and the integrated terminal together. Seven themes are built in:
-
-```text
-:theme default             Original nbcli appearance
-:theme vscode-dark         VS Code Dark Modern-inspired dark palette
-:theme vscode-light        VS Code Light Modern-inspired light palette
-:theme databricks-light    Databricks workspace-inspired light palette
-:theme databricks-dark     Databricks navy-and-lava dark palette
-:theme snowflake-light     Snowflake Workspaces-inspired airy light palette
-:theme snowflake-dark      Snowflake-inspired deep navy editor palette
-```
-
-Use `:theme` without a name to see the active theme and available choices.
-The last selected theme is saved in the user-level nbcli settings file and is
-restored the next time the application starts. Set `NBCLI_CONFIG_HOME` to use a
-custom settings directory.
-The Python and SQL editors use a dedicated token palette for every named theme,
-including theme-specific colors for keywords, strings, numbers, functions,
-types, variables, fields, comments, punctuation, and built-ins.
-
-nbcli cannot change the font face from inside a terminal: the terminal performs
-font rendering for the entire character grid. `:theme` therefore reports the
-recommended terminal-profile font for the selected theme: the platform VS Code
-default (Menlo, Consolas, or Droid Sans Mono), DM Mono for Databricks, and
-JetBrains Mono or Apercu Mono for Snowflake. Configure that face in Terminal,
-iTerm2, Windows Terminal, or the VS Code integrated-terminal profile.
-
 Editable files open in Vim-style Normal mode and cannot be changed until you
 press `i`, `a`, `I`, `A`, `o`, or `O`. The status bar shows `NORMAL`, `INSERT`,
 or `VISUAL`. In a text file, Normal mode supports `h`/`j`/`k`/`l`, `w`/`b`,
@@ -238,6 +209,9 @@ command arguments such as every available option after `:theme`. Open a project
 file by its workspace-relative path with `:file open reports/sales.py`, or open
 it in a new tab with `:tab open reports/sales.py`; both commands complete file
 paths from the current project, including subdirectories.
+file/tab, `:wq` saves and closes it, and `:exit` exits nbcli after the usual
+unsaved-work confirmation. Other short aliases include `:run`,
+`:output clear`, and `:w`.
 
 Open a workspace terminal beside the active document with `:terminal`,
 `:terminal open`, or `:terminal open side`. Use `:terminal open below` for a

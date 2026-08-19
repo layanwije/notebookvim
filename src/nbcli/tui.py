@@ -1364,10 +1364,15 @@ class NotebookApp(App[None]):
             self.query_one("#status", Static).update(self._shortcut_status("READY"))
             return
         if self.text_buffer is not None:
+            dirty = " ●" if self.text_buffer.dirty else ""
             mode = (
                 self.text_editor.vim_mode.upper()
                 if isinstance(self.text_editor, TextFileEditor)
                 else "NORMAL"
+            )
+            self.query_one("#status", Static).update(
+                f" {mode} TEXT │ Ctrl+S: save │ Ctrl+P: find │ "
+                f"{self.text_buffer.path.name}{dirty}"
             )
             self.query_one("#status", Static).update(self._shortcut_status(f"{mode} TEXT"))
             return
@@ -1398,6 +1403,16 @@ class NotebookApp(App[None]):
             f" {mode} │ : cmd │ :help │ Ctrl+B files │ i edit │ "
             "Ctrl+S save │ Ctrl+Q exit"
         )
+            self.query_one("#status", Static).update(
+                f" {mode} CELL │ Cell {self.selected + 1}/{len(self.notebook.cells)} "
+                "│ Esc: cell Normal / notebook Normal │ Tab: complete"
+            )
+            return
+        dirty = " ●" if self.notebook.dirty else ""
+        state = kernel_state or ("BUSY" if self._running_cells else "IDLE")
+        text = (f" NORMAL │ {self.notebook.kernel_name} · {state} │ "
+                f"Cell {self.selected + 1}/{len(self.notebook.cells)} │ {self.notebook.path.name}{dirty}")
+        self.query_one("#status", Static).update(text)
 
     def action_toggle_files(self) -> None:
         if self.editor is not None:
@@ -2430,6 +2445,7 @@ class NotebookApp(App[None]):
             if self.editor.vim_mode == "insert":
                 return
             self.run_worker(self._finish_edit_then_command())
+        if self.editor is not None or text_in_insert:
             return
         self._show_command()
 
