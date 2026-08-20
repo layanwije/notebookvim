@@ -5,7 +5,7 @@ import copy
 import json
 import shlex
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from importlib.resources import files
 from pathlib import Path
 from typing import Optional
@@ -21,6 +21,7 @@ from textual.suggester import Suggester, SuggestFromList
 from textual.widgets import Footer, Header, Input, OptionList, Static, Tab, Tabs, TextArea, Tree
 
 from .commands import COMMANDS, COMMAND_SUGGESTIONS, normalize_command
+from .catalog import CatalogItem, DatabricksCatalog, validate_table_name
 from .ai import provider_statuses
 from .ai_pane import AIInput, AIPane
 from .completion import python_completions
@@ -30,6 +31,9 @@ from .databricks import (
     databricks_client,
     databricks_kernel_code,
 )
+from .databricks_bundle import BundleError, visualize_bundle
+from .execution_tree import ExecutionTreeError, find_python_entry_points, visualize_python
+from .spark_evaluator import SparkEvaluationError, evaluate_spark
 from .data_workspace import DatasetProfile, DuckDBWorkspace, QueryResult, SqlDocument
 from .kernel import ExecutionUpdate, Kernel
 from .lakehouse import InspectionError, InspectionReport, LakehouseInspector, find_delta_root
@@ -208,7 +212,11 @@ class RemoteReportView(Static, can_focus=True):
             table.add_column(column, overflow="ellipsis", max_width=32)
         for row in self.report.rows:
             table.add_row(*row)
-        return Group(table, *(f"\n{detail}" for detail in self.report.details))
+        return Group(
+            *(f"{detail}\n" for detail in self.report.leading_details),
+            table,
+            *(f"\n{detail}" for detail in self.report.details),
+        )
 
 
 class InspectionReportView(Static, can_focus=True):
@@ -305,6 +313,7 @@ class DocumentTab:
     inspection_report: Optional[InspectionReport] = None
     kernel: Optional[Kernel] = None
     read_only: bool = False
+    transient: bool = False
     selected: int = 0
     collapsed_outputs: set[str] = field(default_factory=set)
     notebook_undo: list[tuple[list[Cell], int]] = field(default_factory=list)
@@ -631,16 +640,17 @@ class FuzzyFileSuggester(Suggester):
 
         def score(candidate: str) -> Optional[tuple[int, int, str]]:
             folded = candidate.casefold()
+            query = value.casefold()
             positions = []
             offset = 0
-            for character in value:
+            for character in query:
                 position = folded.find(character, offset)
                 if position < 0:
                     return None
                 positions.append(position)
                 offset = position + 1
             span = positions[-1] - positions[0]
-            prefix_penalty = 0 if folded.startswith(value) else 1
+            prefix_penalty = 0 if folded.startswith(query) else 1
             return prefix_penalty, span + len(candidate), folded
 
         matches = ((candidate, score(candidate)) for candidate in self.paths)
@@ -698,6 +708,11 @@ class ProjectFileInput(Input):
             self.cursor_position = len(self.value)
 
 
+class CatalogSearchInput(ProjectFileInput):
+    def action_cancel_file_picker(self) -> None:
+        self.app.close_catalog_search()  # type: ignore[attr-defined]
+
+
 class ProjectTree(Tree[Path]):
     BINDINGS = [
         *Tree.BINDINGS,
@@ -709,6 +724,8 @@ class ProjectTree(Tree[Path]):
         Binding("alt+enter", "open_in_tab", "Open in tab", show=False, priority=True),
         Binding("escape", "arm_option_enter", "Option prefix", show=False, priority=True),
         Binding("enter", "select_or_open_tab", "Open", show=False, priority=True),
+        Binding("ctrl+right", "widen", "Widen explorer", show=False),
+        Binding("ctrl+left", "narrow", "Narrow explorer", show=False),
     ]
 
     _option_enter_armed = False
@@ -738,6 +755,12 @@ class ProjectTree(Tree[Path]):
         self._option_enter_armed = True
         self.set_timer(0.35, self._disarm_option_enter)
 
+    def action_widen(self) -> None:
+        self.app.resize_explorer(8)  # type: ignore[attr-defined]
+
+    def action_narrow(self) -> None:
+        self.app.resize_explorer(-8)  # type: ignore[attr-defined]
+
     def _disarm_option_enter(self) -> None:
         self._option_enter_armed = False
 
@@ -761,6 +784,54 @@ class ProjectTree(Tree[Path]):
         await super()._on_mouse_down(event)
 
 
+class CatalogTree(Tree[CatalogItem]):
+    """Lazy Unity Catalog tree with the same navigation as the file tree."""
+
+    BINDINGS = [
+        *Tree.BINDINGS,
+        Binding("j", "cursor_down", "Next", show=False),
+        Binding("k", "cursor_up", "Previous", show=False),
+        Binding("h", "collapse_or_parent", "Collapse", show=False),
+        Binding("l", "expand_or_select", "Expand", show=False),
+        Binding("enter", "expand_or_select", "Open", show=False, priority=True),
+        Binding("o", "open_scratch", "Open scratch notebook", show=False),
+        Binding("r", "refresh_node", "Refresh", show=False),
+        Binding("slash", "find", "Find", show=False),
+        Binding("ctrl+right", "widen", "Widen explorer", show=False),
+        Binding("ctrl+left", "narrow", "Narrow explorer", show=False),
+    ]
+
+    def action_collapse_or_parent(self) -> None:
+        node = self.cursor_node
+        if node is not None and node.is_expanded:
+            node.collapse()
+        else:
+            self.action_cursor_parent()
+
+    def action_expand_or_select(self) -> None:
+        node = self.cursor_node
+        if node is not None and node.allow_expand:
+            node.expand()
+        else:
+            self.action_select_cursor()
+
+    def action_refresh_node(self) -> None:
+        node = self.cursor_node or self.root
+        self.app.refresh_catalog_node(node)  # type: ignore[attr-defined]
+
+    def action_find(self) -> None:
+        self.app.open_catalog_search()  # type: ignore[attr-defined]
+
+    def action_open_scratch(self) -> None:
+        self.app.open_databricks_scratch_from_explorer()  # type: ignore[attr-defined]
+
+    def action_widen(self) -> None:
+        self.app.resize_explorer(8)  # type: ignore[attr-defined]
+
+    def action_narrow(self) -> None:
+        self.app.resize_explorer(-8)  # type: ignore[attr-defined]
+
+
 class TabBar(Tabs):
     async def _on_tab_clicked(self, event: Tab.Clicked) -> None:
         await super()._on_tab_clicked(event)
@@ -782,10 +853,17 @@ class NotebookApp(App[None]):
         height: 2;
         background: $surface-lighten-1; color: $text-muted;
     }
-    #files {
+    #sidebar {
         width: 32; min-width: 20; height: 100%;
         border-right: solid $surface-lighten-2;
         background: $surface-darken-1;
+    }
+    #sidebar-switcher {
+        width: 100%; height: auto; padding: 0 1;
+        background: $surface-lighten-1; color: $text-muted;
+    }
+    #files, #catalog-tree {
+        width: 100%; height: 1fr; background: $surface-darken-1;
     }
     #document-column { width: 1fr; height: 100%; layout: horizontal; }
     #notebook { width: 1fr; height: 100%; padding: 1 2; }
@@ -876,7 +954,7 @@ class NotebookApp(App[None]):
         dock: bottom; width: 100%; height: auto; max-height: 7;
         border: round $accent; background: $panel;
     }
-    #file-picker {
+    #file-picker, #catalog-search {
         dock: top; height: 3; border: tall $accent; padding: 0 1;
     }
     """
@@ -886,7 +964,7 @@ class NotebookApp(App[None]):
         ("colon", "command", "Command"),
         ("ctrl+s", "save", "Save"),
         ("ctrl+c", "interrupt", "Interrupt"),
-        Binding("ctrl+e", "toggle_files", "Files", priority=True),
+        Binding("ctrl+e", "toggle_files", "Explorers", priority=True),
         Binding("ctrl+p", "find_file", "Find", priority=True),
         Binding("ctrl+tab", "toggle_file_focus", "Files/editor", priority=True),
         Binding("shift+tab", "next_tab", "Next tab", priority=True),
@@ -960,13 +1038,21 @@ class NotebookApp(App[None]):
         self.git = GitService(self.workspace_root)
         self.data_workspace: Optional[DuckDBWorkspace] = None
         self.remote: Optional[DatabricksRemote] = None
+        self.catalog_service: Optional[DatabricksCatalog] = None
+        self.sidebar_mode = "files"
+        self.file_explorer_open = True
+        self.databricks_explorer_open = False
+        self.catalog_loaded = False
+        self.explorer_width = 32
         self.last_remote_run_id: Optional[int] = None
+        self._last_command = ""
         self.vim_register = ""
         self.vim_register_linewise = False
         self._vim_cell_register: Optional[Cell] = None
         self._vim_pending_key = ""
         self._escape_close_armed = False
         self._sql_document_count = 0
+        self._databricks_scratch_count = 0
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -979,8 +1065,12 @@ class NotebookApp(App[None]):
             placeholder="Find project file",
             id="file-picker",
         )
+        yield CatalogSearchInput([], placeholder="Find loaded catalog item", id="catalog-search")
         with Horizontal(id="workspace"):
-            yield self._project_tree()
+            with Vertical(id="sidebar"):
+                yield Static("● FILES", id="sidebar-switcher")
+                yield self._project_tree()
+                yield CatalogTree("DATABRICKS", id="catalog-tree")
             with Vertical(id="document-column"):
                 with VerticalScroll(id="notebook"):
                     for index in range(len(self.notebook.cells) if self.tabs else 0):
@@ -1000,6 +1090,8 @@ class NotebookApp(App[None]):
         self.query_one("#command", CommandInput).display = False
         self.query_one("#command-suggestions", OptionList).display = False
         self.query_one("#file-picker", ProjectFileInput).display = False
+        self.query_one("#catalog-search", CatalogSearchInput).display = False
+        self.query_one("#catalog-tree", CatalogTree).display = False
         self.query_one("#terminal-pane", TerminalPane).display = False
         self.query_one("#ai-pane", AIPane).display = False
         self.query_one("#inspection-pane", InspectionPane).display = False
@@ -1096,6 +1188,190 @@ class NotebookApp(App[None]):
         picker.suggester = FuzzyFileSuggester(suggestions)
         picker._suggestion = None
 
+    def _catalog(self) -> DatabricksCatalog:
+        if self.databricks_connection is None:
+            raise RemoteError("Connect first with :databricks connect [profile]")
+        if self.catalog_service is None:
+            self.catalog_service = DatabricksCatalog(
+                databricks_client(self.databricks_connection)
+            )
+        return self.catalog_service
+
+    def _show_sidebar(self, mode: str) -> None:
+        files_tree = self.query_one("#files", ProjectTree)
+        catalog_tree = self.query_one("#catalog-tree", CatalogTree)
+        if mode == "files":
+            self.file_explorer_open = True
+        else:
+            self.databricks_explorer_open = True
+        self.sidebar_mode = mode
+        self.query_one("#sidebar", Vertical).display = True
+        files_tree.display = mode == "files"
+        catalog_tree.display = mode == "catalog"
+        self._update_explorer_switcher()
+        (catalog_tree if mode == "catalog" else files_tree).focus()
+
+    def _update_explorer_switcher(self) -> None:
+        labels: list[str] = []
+        if self.file_explorer_open:
+            labels.append(("● " if self.sidebar_mode == "files" else "○ ") + "FILES")
+        if self.databricks_explorer_open:
+            labels.append(("● " if self.sidebar_mode == "catalog" else "○ ") + "DATABRICKS")
+        self.query_one("#sidebar-switcher", Static).update("\n".join(labels))
+
+    def _close_explorer(self, mode: str) -> None:
+        if mode == "files":
+            self.file_explorer_open = False
+        else:
+            self.databricks_explorer_open = False
+        if self.sidebar_mode == mode:
+            if mode == "files" and self.databricks_explorer_open:
+                self._show_sidebar("catalog")
+                return
+            if mode == "catalog" and self.file_explorer_open:
+                self._show_sidebar("files")
+                return
+        if not self.file_explorer_open and not self.databricks_explorer_open:
+            self.query_one("#sidebar", Vertical).display = False
+        else:
+            self._update_explorer_switcher()
+
+    def resize_explorer(self, change: int = 0, reset: bool = False) -> None:
+        self.explorer_width = 32 if reset else max(
+            20, min(80, self.explorer_width + change)
+        )
+        self.query_one("#sidebar", Vertical).styles.width = self.explorer_width
+        self.notify(f"Explorer width: {self.explorer_width} columns", title="Explorer")
+
+    async def _open_databricks_explorer(self, focus: Optional[str] = None) -> None:
+        try:
+            self._catalog()
+        except Exception as exc:
+            self.notify(str(exc), title="Databricks explorer failed", severity="error", timeout=15)
+            return
+        tree = self.query_one("#catalog-tree", CatalogTree)
+        self.databricks_explorer_open = True
+        if not self.catalog_loaded:
+            tree.root.remove_children()
+            roots = (
+                CatalogItem("workspace_root", "Workspace Items", "/"),
+                CatalogItem("catalogs_root", "Catalogs", "catalogs"),
+                CatalogItem("compute_root", "Compute", "compute"),
+                CatalogItem("workflows_root", "Workflows", "workflows"),
+            )
+            for item in roots:
+                tree.root.add(item.name, item, allow_expand=True)
+            self.catalog_loaded = True
+        tree.root.expand()
+        self._show_sidebar("catalog")
+        if focus:
+            node = next(
+                (child for child in tree.root.children if child.data.kind == focus),
+                None,
+            )
+            if node is not None:
+                tree.move_cursor(node)
+                await self._load_catalog_node(node)
+
+    async def _open_catalog(self) -> None:
+        await self._open_databricks_explorer("catalogs_root")
+
+    async def _load_catalog_node(self, node: Tree.Node[CatalogItem]) -> None:
+        item = node.data
+        expandable = {
+            "workspace_root", "workspace_directory", "catalogs_root",
+            "catalog", "schema", "compute_root", "clusters_root",
+            "warehouses_root", "workflows_root", "jobs_root",
+            "pipelines_root", "job",
+        }
+        if item is None or item.kind not in expandable:
+            return
+        if node.children:
+            return
+        try:
+            if item.kind in {"workspace_root", "workspace_directory"}:
+                children = await asyncio.to_thread(
+                    self._catalog().workspace_items, item.full_name
+                )
+            elif item.kind == "catalogs_root":
+                children = await asyncio.to_thread(self._catalog().catalogs)
+            elif item.kind == "catalog":
+                children = await asyncio.to_thread(self._catalog().schemas, item.full_name)
+            elif item.kind == "schema":
+                children = await asyncio.to_thread(self._catalog().tables, item.full_name)
+            elif item.kind == "compute_root":
+                children = [
+                    CatalogItem(
+                        "serverless", "Serverless", "serverless",
+                        {"state": "available when enabled for the workspace"},
+                    ),
+                    CatalogItem("clusters_root", "Clusters", "clusters"),
+                    CatalogItem("warehouses_root", "SQL Warehouses", "warehouses"),
+                ]
+            elif item.kind == "clusters_root":
+                children = await asyncio.to_thread(self._catalog().clusters)
+            elif item.kind == "warehouses_root":
+                children = await asyncio.to_thread(self._catalog().warehouses)
+            elif item.kind == "workflows_root":
+                children = [
+                    CatalogItem("jobs_root", "Jobs", "jobs"),
+                    CatalogItem("pipelines_root", "Pipelines", "pipelines"),
+                ]
+            elif item.kind == "jobs_root":
+                children = await asyncio.to_thread(self._catalog().jobs)
+            elif item.kind == "pipelines_root":
+                children = await asyncio.to_thread(self._catalog().pipelines)
+            else:
+                children = await asyncio.to_thread(self._catalog().runs, item.full_name)
+        except Exception as exc:
+            self.notify(str(exc), title="Catalog failed", severity="error", timeout=15)
+            return
+        for child in children:
+            node.add(
+                child.name,
+                child,
+                allow_expand=child.kind in {
+                    "workspace_directory", "catalog", "schema", "clusters_root",
+                    "warehouses_root", "jobs_root", "pipelines_root", "job"
+                },
+            )
+        node.expand()
+
+    def refresh_catalog_node(self, node: Tree.Node[CatalogItem]) -> None:
+        if node is self.query_one("#catalog-tree", CatalogTree).root:
+            self.catalog_loaded = False
+            self.run_worker(self._open_databricks_explorer())
+            return
+        node.remove_children()
+        self.run_worker(self._load_catalog_node(node))
+
+    def _loaded_catalog_nodes(self) -> list[Tree.Node[CatalogItem]]:
+        tree = self.query_one("#catalog-tree", CatalogTree)
+        nodes: list[Tree.Node[CatalogItem]] = []
+
+        def visit(node: Tree.Node[CatalogItem]) -> None:
+            if node.data is not None:
+                nodes.append(node)
+            for child in node.children:
+                visit(child)
+
+        visit(tree.root)
+        return nodes
+
+    def open_catalog_search(self) -> None:
+        nodes = self._loaded_catalog_nodes()
+        search = self.query_one("#catalog-search", CatalogSearchInput)
+        search.suggester = FuzzyFileSuggester([node.data.full_name for node in nodes])
+        search.value = ""
+        search.display = True
+        search.focus()
+
+    def close_catalog_search(self) -> None:
+        search = self.query_one("#catalog-search", CatalogSearchInput)
+        search.value = ""
+        search.display = False
+        self.query_one("#catalog-tree", CatalogTree).focus()
+
     def _update_sub_title(self) -> None:
         if not self.tabs:
             self.sub_title = "No file open"
@@ -1136,7 +1412,9 @@ class NotebookApp(App[None]):
     def action_toggle_file_focus(self) -> None:
         if self.editor is not None:
             return
-        tree = self.query_one("#files", Tree)
+        tree = self.query_one(
+            "#catalog-tree" if self.sidebar_mode == "catalog" else "#files", Tree
+        )
         if tree.has_focus:
             self._focus_document()
         else:
@@ -1551,22 +1829,46 @@ class NotebookApp(App[None]):
     @staticmethod
     def _shortcut_status(mode: str) -> str:
         return (
-            f" {mode} │ : cmd │ :help │ Ctrl+E files │ i edit │ "
+            f" {mode} │ : cmd │ :help │ Ctrl+E explorers │ i edit │ "
             "Ctrl+S save │ Ctrl+Q exit"
         )
 
     def action_toggle_files(self) -> None:
         if self.editor is not None:
             return
-        tree = self.query_one("#files", Tree)
-        if not tree.display:
-            tree.display = True
+        sidebar = self.query_one("#sidebar", Vertical)
+        if not sidebar.display:
+            if self.file_explorer_open:
+                self._show_sidebar("files")
+            elif self.databricks_explorer_open:
+                self._show_sidebar("catalog")
+            else:
+                self._show_sidebar("files")
+            return
+        tree = self.query_one(
+            "#catalog-tree" if self.sidebar_mode == "catalog" else "#files", Tree
+        )
+        if not tree.has_focus:
             tree.focus()
-        elif not tree.has_focus:
-            tree.focus()
+            return
+        if self.sidebar_mode == "catalog" and self.file_explorer_open:
+            self._show_sidebar("files")
+            return
+        if self.databricks_explorer_open and self.catalog_loaded:
+            self._show_sidebar("catalog")
+        elif self.databricks_explorer_open and self.databricks_connection is not None:
+            self.run_worker(self._open_databricks_explorer())
+        elif self.file_explorer_open:
+            self.notify(
+                "Open Databricks with :databricks explorer when you need it.",
+                title="Only the file explorer is open",
+            )
         else:
-            tree.display = False
-            self._focus_document()
+            self.notify(
+                "Connect with :databricks connect, then open :databricks explorer.",
+                title="Databricks explorer unavailable",
+                severity="warning",
+            )
 
     def action_find_file(self) -> None:
         if self.editor is not None:
@@ -1589,13 +1891,159 @@ class NotebookApp(App[None]):
         self._focus_document()
         self._update_status()
 
-    async def on_tree_node_selected(self, event: Tree.NodeSelected[Path]) -> None:
-        if event.control.id != "files" or event.node.data is None:
+    async def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
+        if event.node.data is None:
+            return
+        if event.control.id == "catalog-tree":
+            item = event.node.data
+            if event.node.allow_expand:
+                await self._load_catalog_node(event.node)
+            elif item.kind in {"serverless", "cluster"}:
+                self._select_databricks_compute(item)
+            elif item.kind == "workspace_item":
+                await self._open_databricks_workspace_item(item)
+            elif item.details.get("resource") == "table":
+                await self._describe_catalog_table(item.full_name)
+            elif item.kind == "run":
+                try:
+                    report = await asyncio.to_thread(
+                        self._remote_service().logs, int(item.full_name)
+                    )
+                    await self._show_remote_report(report)
+                except Exception as exc:
+                    self.notify(str(exc), title="Run logs failed", severity="error")
+            else:
+                await self._show_remote_report(self._catalog().item_report(item))
+            return
+        if event.control.id != "files":
             return
         path = Path(event.node.data)
         if path.is_dir():
             return
         await self._open_project_file(path)
+
+    def _select_databricks_compute(self, item: CatalogItem) -> None:
+        connection = self.databricks_connection
+        if connection is None:
+            self.notify(
+                "Connect first with :databricks connect [profile].",
+                title="Compute selection failed",
+                severity="error",
+            )
+            return
+        compute = "serverless" if item.kind == "serverless" else item.full_name
+        self.databricks_connection = replace(connection, compute=compute)
+        kernels = {
+            id(tab.kernel): tab.kernel for tab in self.tabs if tab.kernel is not None
+        }
+        kernels[id(self.kernel)] = self.kernel
+        for kernel in kernels.values():
+            self._configure_databricks_kernel(kernel)
+        target = "Serverless" if compute == "serverless" else item.name
+        self.notify(
+            f"Spark operations will run on {target}. The session starts with the next query.",
+            title="Databricks compute selected",
+        )
+
+    def open_databricks_scratch_from_explorer(self) -> None:
+        node = self.query_one("#catalog-tree", CatalogTree).cursor_node
+        item = node.data if node is not None else None
+        table = (
+            item.full_name
+            if item is not None and item.details.get("resource") == "table"
+            else None
+        )
+        self.run_worker(self._open_databricks_scratch(table))
+
+    async def _open_databricks_scratch(self, table_name: Optional[str] = None) -> None:
+        if self.databricks_connection is None:
+            await self._connect_databricks(None, "serverless")
+        elif self.databricks_connection.compute is None:
+            self._select_databricks_compute(
+                CatalogItem("serverless", "Serverless", "serverless")
+            )
+        if self.databricks_connection is None:
+            return
+
+        table = "catalog.schema.table"
+        if table_name:
+            try:
+                table = validate_table_name(table_name)
+            except Exception as exc:
+                self.notify(str(exc), title="Databricks notebook", severity="error")
+                return
+        self._databricks_scratch_count += 1
+        path = self.workspace_root / (
+            f"Databricks Scratch {self._databricks_scratch_count}.ipynb"
+        )
+        notebook = new_notebook(path)
+        notebook.cells[0].source = f'df = spark.table("{table}")\ndf'
+        kernel = Kernel(notebook.kernel_name)
+        self._configure_databricks_kernel(kernel)
+        await self._append_tab(
+            DocumentTab(
+                path=path,
+                notebook=notebook,
+                kernel=kernel,
+                transient=True,
+            )
+        )
+        compute = self.databricks_connection.compute or "serverless"
+        target = "Serverless" if compute == "serverless" else compute
+        self.notify(
+            f"Unsaved scratch notebook attached to {target}.",
+            title="Databricks notebook",
+        )
+
+    async def _open_databricks_workspace_item(self, item: CatalogItem) -> None:
+        try:
+            content = await asyncio.to_thread(
+                self._catalog().export_workspace_item, item
+            )
+            if len(content) > 2 * 1024 * 1024:
+                raise RemoteError("Remote files larger than 2 MiB cannot be opened")
+            text = content.decode("utf-8")
+            relative = Path(item.full_name.strip("/") or item.name)
+            suffixes = {
+                "PYTHON": ".py",
+                "SQL": ".sql",
+                "SCALA": ".scala",
+                "R": ".r",
+            }
+            if not relative.suffix:
+                relative = relative.with_suffix(
+                    suffixes.get(item.details.get("language", "").upper(), ".txt")
+                )
+            virtual_path = self.workspace_root / ".notebookvim" / "databricks" / relative
+            existing = next(
+                (index for index, tab in enumerate(self.tabs) if tab.path == virtual_path),
+                None,
+            )
+            if existing is not None:
+                await self._activate_tab(existing)
+                return
+            await self._append_tab(
+                DocumentTab(
+                    path=virtual_path,
+                    text_buffer=TextBuffer(path=virtual_path, text=text),
+                    read_only=True,
+                )
+            )
+            self.notify(item.full_name, title="Opened from Databricks")
+        except UnicodeDecodeError:
+            self.notify(
+                "This remote item is not a UTF-8 text file.",
+                title="Open failed",
+                severity="warning",
+            )
+        except Exception as exc:
+            self.notify(str(exc), title="Open failed", severity="error", timeout=15)
+
+    async def on_tree_node_expanded(
+        self, event: Tree.NodeExpanded[CatalogItem]
+    ) -> None:
+        if event.control.id == "catalog-tree":
+            await self._load_catalog_node(event.node)
 
     def open_project_file_in_tab(self, path: Path) -> None:
         self.run_worker(self._open_project_file(path, new_tab=True))
@@ -2125,6 +2573,71 @@ class NotebookApp(App[None]):
                 remote_report=report,
             )
         )
+
+    async def _describe_catalog_table(self, table_name: str) -> None:
+        try:
+            name = validate_table_name(table_name)
+            report = await asyncio.to_thread(self._catalog().describe, name)
+            await self._show_remote_report(report)
+        except Exception as exc:
+            self.notify(str(exc), title="Describe failed", severity="error", timeout=15)
+
+    async def _list_catalog_tables(self, schema_name: str) -> None:
+        try:
+            if not schema_name:
+                tree = self.query_one("#catalog-tree", CatalogTree)
+                item = tree.cursor_node.data if tree.cursor_node is not None else None
+                if item is not None and item.kind == "schema":
+                    schema_name = item.full_name
+            if not schema_name:
+                raise RemoteError("Usage: :tables catalog.schema")
+            tables = await asyncio.to_thread(self._catalog().tables, schema_name)
+            await self._show_remote_report(
+                RemoteReport(
+                    f"Tables · {schema_name}",
+                    ["type", "name", "full name"],
+                    [[item.kind, item.name, item.full_name] for item in tables],
+                )
+            )
+        except Exception as exc:
+            self.notify(str(exc), title="Tables failed", severity="error", timeout=15)
+
+    async def _sample_catalog_table(self, table_name: str, limit: int = 20) -> None:
+        try:
+            name = validate_table_name(table_name)
+            if not 1 <= limit <= 1000:
+                raise RemoteError("Sample limit must be between 1 and 1000")
+            if self.databricks_connection is None or not self.databricks_connection.compute:
+                raise RemoteError(
+                    "Remote Spark is required. Expand Compute and select Serverless or a "
+                    "cluster, or reconnect with --serverless/--cluster ID."
+                )
+            cell = Cell(
+                CellType.CODE,
+                f"spark.table({name!r}).limit({limit}).show(truncate=False)",
+            )
+
+            async def ignore_update(_: ExecutionUpdate) -> None:
+                return None
+
+            succeeded = await self.kernel.execute(cell, ignore_update)
+            details: list[str] = []
+            for output in cell.outputs:
+                if hasattr(output, "text"):
+                    details.append(str(output.text))
+                elif hasattr(output, "data"):
+                    details.append(str(output.data.get("text/plain", output.data)))
+                elif hasattr(output, "evalue"):
+                    details.append(f"{output.ename}: {output.evalue}")
+            if not succeeded:
+                raise RemoteError("\n".join(details) or "Remote sample failed")
+            await self._show_remote_report(
+                RemoteReport(
+                    f"Sample · {name}", ["rows"], [], details or ["No rows returned"]
+                )
+            )
+        except Exception as exc:
+            self.notify(str(exc), title="Sample failed", severity="error", timeout=15)
 
     async def _reload_active_remote_file(self, path: Path) -> None:
         tab = self._active_tab
@@ -2770,17 +3283,18 @@ class NotebookApp(App[None]):
         suggestions = self._contextual_command_suggestions()
         inspection_prefix = self._inspection_completion_prefix()
         command.suggester = ContextualCommandSuggester(suggestions, inspection_prefix)
-        command.value = ""
+        command.value = self._last_command
+        command.cursor_position = len(command.value)
         command.display = True
         command.focus()
-        self._update_command_options("")
+        self._update_command_options(command.value)
         self.call_after_refresh(
             lambda: setattr(command, "_suggestion", inspection_prefix or suggestions[0])
             if command.display and not command.value
             else None
         )
         self.query_one("#status", Static).update(
-            " COMMAND │ Tab: complete │ :help lists commands │ Escape: cancel"
+            " COMMAND │ Enter: run │ Tab: complete │ Escape: cancel"
         )
 
     def _command_option_candidates(self, value: str) -> list[str]:
@@ -2859,6 +3373,20 @@ class NotebookApp(App[None]):
         self._update_status()
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "catalog-search":
+            search = self.query_one("#catalog-search", CatalogSearchInput)
+            value = event.value.strip()
+            if search._suggestion:
+                value = search._suggestion
+            nodes = self._loaded_catalog_nodes()
+            self.close_catalog_search()
+            match = next(
+                (node for node in nodes if node.data.full_name == value), None
+            )
+            if match is not None:
+                tree = self.query_one("#catalog-tree", CatalogTree)
+                tree.move_cursor(match)
+            return
         if event.input.id == "file-picker":
             value = event.value.strip()
             picker = self.query_one("#file-picker", ProjectFileInput)
@@ -2872,6 +3400,8 @@ class NotebookApp(App[None]):
         if event.input.id != "command":
             return
         command = normalize_command(event.value)
+        if command:
+            self._last_command = command
         self.close_command()
         await self._dispatch_command(command)
 
@@ -3052,6 +3582,152 @@ class NotebookApp(App[None]):
             await self._profile_current()
         elif command == "profile save":
             self._save_profile()
+        elif command in {
+            "execution python main",
+            "execution python entry",
+            "databricks execution python main",
+        }:
+            search = await asyncio.to_thread(find_python_entry_points, self.workspace_root)
+            databricks_only = command.startswith("databricks ")
+            entries = (
+                tuple(
+                    entry
+                    for entry in search.entries
+                    if entry.kind.startswith("Databricks root task")
+                )
+                if databricks_only
+                else search.entries
+            )
+            rows = [
+                [
+                    entry.confidence,
+                    str(entry.path.relative_to(search.root)),
+                    str(entry.line),
+                    entry.symbol,
+                    entry.kind,
+                ]
+                for entry in entries
+            ]
+            details = (
+                [
+                    "These are the root Python tasks Databricks can call first; tasks with dependencies are excluded.",
+                    "Multiple rows mean the bundle has independent starting branches that may run in parallel.",
+                ]
+                if databricks_only
+                else [
+                    "Candidates are ranked from explicit packaging configuration to conventional names.",
+                    "Finding an entry point is static analysis; applications can also start through frameworks or external tooling.",
+                ]
+            )
+            if not rows:
+                details.insert(
+                    0,
+                    "No Databricks root Python tasks found."
+                    if databricks_only
+                    else "No likely Python entry points found.",
+                )
+            if search.skipped:
+                details.append(f"Skipped {len(search.skipped)} unreadable or invalid Python file(s).")
+            if search.diagnostics:
+                details.append(
+                    "Diagnostics:\n" + "\n".join(f"• {item}" for item in search.diagnostics)
+                )
+            await self._show_remote_report(
+                RemoteReport(
+                    "Databricks Python entry points"
+                    if databricks_only
+                    else "Python entry points",
+                    ["confidence", "file", "line", "symbol", "reason"],
+                    rows,
+                    details,
+                )
+            )
+        elif command == "execution python visualize":
+            active_tab = self._active_tab
+            if active_tab.dirty:
+                self.notify(
+                    "Save the Python file before visualizing it",
+                    title="Execution visualization",
+                    severity="warning",
+                )
+                return
+            try:
+                execution = await asyncio.to_thread(visualize_python, active_tab.path)
+            except ExecutionTreeError as exc:
+                self.notify(str(exc), title="Execution visualization", severity="error")
+                return
+            rows = [
+                [
+                    function.name,
+                    str(function.line),
+                    str(len(function.calls)),
+                    ", ".join(call.name for call in function.calls) or "—",
+                ]
+                for function in execution.functions
+            ]
+            details = [
+                "Static execution tree (source order; code is not run):\n" + execution.graph,
+                "External and dynamic calls are shown but cannot be followed statically.",
+            ]
+            if execution.unreachable:
+                details.append(
+                    "Definitions not reached from module execution: "
+                    + ", ".join(execution.unreachable)
+                )
+            await self._show_remote_report(
+                RemoteReport(
+                    f"Python execution · {execution.path.name}",
+                    ["function", "line", "calls", "direct calls"],
+                    rows,
+                    details,
+                )
+            )
+        elif command in {"execution spark evaluate", "execution spark visualize"}:
+            active_tab = self._active_tab
+            if active_tab.dirty:
+                self.notify(
+                    "Save the Python file before evaluating Spark execution",
+                    title="Spark evaluation",
+                    severity="warning",
+                )
+                return
+            try:
+                evaluation = await asyncio.to_thread(evaluate_spark, active_tab.path)
+            except SparkEvaluationError as exc:
+                self.notify(str(exc), title="Spark evaluation", severity="error")
+                return
+            rows = [
+                [
+                    operation.scope,
+                    str(operation.line),
+                    operation.name,
+                    operation.category,
+                    operation.shuffle,
+                    operation.execution,
+                    operation.note,
+                ]
+                for operation in evaluation.operations
+            ]
+            details = [
+                f"Recognized {len(evaluation.operations)} Spark operations · "
+                f"{evaluation.likely_shuffles} likely shuffle boundaries · "
+                f"{evaluation.actions} actions.",
+                "Static estimate only: data sizes, statistics, partitioning metadata, join strategy, and AQE can change the physical plan.",
+            ]
+            leading = (
+                ["Estimated Spark execution\n" + evaluation.graph]
+                if command.endswith("visualize")
+                else []
+            )
+            await self._show_remote_report(
+                RemoteReport(
+                    f"Spark evaluation · {evaluation.path.name}",
+                    ["scope", "line", "operation", "class", "shuffle", "execution", "assessment"],
+                    rows,
+                    details,
+                    leading,
+                )
+            )
         elif command.startswith("inspect "):
             await self._dispatch_inspect_command(command)
         elif command == "theme":
@@ -3063,11 +3739,150 @@ class NotebookApp(App[None]):
             )
         elif command.startswith("theme "):
             self.action_set_app_theme(command.removeprefix("theme "))
+        elif command == "explorer file open":
+            self._show_sidebar("files")
+        elif command == "explorer file close":
+            self._close_explorer("files")
+        elif command == "explorer databricks open":
+            await self._open_databricks_explorer()
+        elif command == "explorer databricks close":
+            self._close_explorer("catalog")
+        elif command == "explorer wider":
+            self.resize_explorer(8)
+        elif command == "explorer narrower":
+            self.resize_explorer(-8)
+        elif command == "explorer reset":
+            self.resize_explorer(reset=True)
+        elif command in {"databricks explorer", "databricks explorer open"}:
+            await self._open_databricks_explorer()
+        elif command == "databricks explorer close":
+            self._close_explorer("catalog")
+        elif command == "databricks catalog":
+            await self._open_catalog()
+        elif command == "databricks workspace":
+            await self._open_databricks_explorer("workspace_root")
+        elif command == "databricks compute":
+            await self._open_databricks_explorer("compute_root")
+        elif command == "databricks workflows":
+            await self._open_databricks_explorer("workflows_root")
+        elif command == "databricks notebook" or command.startswith(
+            "databricks notebook "
+        ):
+            table = command.removeprefix("databricks notebook").strip() or None
+            await self._open_databricks_scratch(table)
+        elif command == "tables" or command.startswith("tables "):
+            await self._list_catalog_tables(command.removeprefix("tables").strip())
+        elif command.startswith("describe "):
+            await self._describe_catalog_table(command.removeprefix("describe ").strip())
+        elif command == "describe":
+            self.notify(
+                "Usage: :describe catalog.schema.table",
+                title="Catalog",
+                severity="warning",
+            )
+        elif command.startswith("sample "):
+            arguments = shlex.split(command.removeprefix("sample "))
+            if not arguments or len(arguments) > 2 or (
+                len(arguments) == 2 and not arguments[1].isdigit()
+            ):
+                self.notify(
+                    "Usage: :sample catalog.schema.table [LIMIT]",
+                    title="Catalog",
+                    severity="warning",
+                )
+            else:
+                await self._sample_catalog_table(
+                    arguments[0], int(arguments[1]) if len(arguments) == 2 else 20
+                )
+        elif command == "sample":
+            self.notify(
+                "Usage: :sample catalog.schema.table [LIMIT]",
+                title="Catalog",
+                severity="warning",
+            )
         elif command == "databricks connect" or command.startswith("databricks connect "):
-            profile = command.removeprefix("databricks connect").strip() or None
-            await self._connect_databricks(profile)
+            arguments = shlex.split(command.removeprefix("databricks connect").strip())
+            profile = None
+            compute = None
+            while arguments:
+                argument = arguments.pop(0)
+                if argument == "--serverless":
+                    if compute is not None:
+                        self.notify(
+                            "Choose either --serverless or --cluster.",
+                            title="Databricks",
+                            severity="error",
+                        )
+                        return
+                    compute = "serverless"
+                elif argument == "--cluster" and arguments:
+                    if compute is not None:
+                        self.notify(
+                            "Choose either --serverless or --cluster.",
+                            title="Databricks",
+                            severity="error",
+                        )
+                        return
+                    compute = arguments.pop(0)
+                elif argument.startswith("--") or profile is not None:
+                    self.notify(
+                        "Usage: :databricks connect [PROFILE] [--serverless | --cluster ID]",
+                        title="Databricks",
+                        severity="error",
+                    )
+                    return
+                else:
+                    profile = argument
+            await self._connect_databricks(profile, compute)
         elif command == "databricks status":
             self._show_databricks_status()
+        elif command == "databricks bundle visualize" or command.startswith(
+            "databricks bundle visualize "
+        ):
+            arguments = shlex.split(command.removeprefix("databricks bundle visualize").strip())
+            target = None
+            if arguments:
+                if len(arguments) != 2 or arguments[0] != "--target":
+                    self.notify(
+                        "Usage: :databricks bundle visualize [--target TARGET]",
+                        title="Databricks bundle",
+                        severity="warning",
+                    )
+                    return
+                target = arguments[1]
+            try:
+                active_tab = self._active_tab
+                if active_tab.dirty:
+                    raise BundleError("Save databricks.yml before visualizing it")
+                path = active_tab.path
+                visualization = await asyncio.to_thread(visualize_bundle, path, target)
+            except BundleError as exc:
+                self.notify(str(exc), title="Bundle visualization", severity="error")
+                return
+            target_label = visualization.target or "base configuration"
+            rows = [
+                [task.job_key, task.task_key, task.task_type, ", ".join(task.depends_on) or "—", task.source]
+                for task in visualization.tasks
+            ]
+            details = [
+                f"Target: {target_label}",
+                f"Configuration: {', '.join(str(item.relative_to(path.parent)) if item.is_relative_to(path.parent) else str(item) for item in visualization.files)}",
+            ]
+            if visualization.pipelines:
+                details.append("Pipelines: " + ", ".join(visualization.pipelines))
+            if visualization.resources:
+                details.append("Resources: " + ", ".join(f"{kind} ({count})" for kind, count in visualization.resources))
+            if visualization.warnings:
+                details.append("Warnings:\n" + "\n".join(f"• {item}" for item in visualization.warnings))
+            await self._show_remote_report(
+                RemoteReport(
+                    f"Bundle · {visualization.name}",
+                    ["job", "task", "type", "depends on", "source"],
+                    rows,
+                    details,
+                    ["Execution order\n" + visualization.graph],
+                )
+            )
         elif command.startswith("databricks "):
             operation = command.removeprefix("databricks ")
             if operation.startswith("sync set"):
@@ -3168,14 +3983,17 @@ class NotebookApp(App[None]):
                 self.databricks_connection.profile,
                 self.databricks_connection.host,
                 self.databricks_connection.auth_type,
+                self.databricks_connection.compute,
             )
         )
 
-    async def _connect_databricks(self, profile: Optional[str]) -> None:
+    async def _connect_databricks(
+        self, profile: Optional[str], compute: Optional[str] = None
+    ) -> None:
         target_label = profile or "default authentication"
         self.notify(f"Connecting with {target_label}…", title="Databricks")
         try:
-            connection = await asyncio.to_thread(connect_databricks, profile)
+            connection = await asyncio.to_thread(connect_databricks, profile, compute)
         except Exception as exc:
             self.notify(
                 f"{exc}\nConfigure authentication with `databricks auth login` and try again.",
@@ -3185,14 +4003,27 @@ class NotebookApp(App[None]):
             )
             return
         self.databricks_connection = connection
+        self.databricks_explorer_open = True
+        self._update_explorer_switcher()
         self.remote = None
+        self.catalog_service = None
+        self.catalog_loaded = False
+        catalog_tree = self.query_one("#catalog-tree", CatalogTree)
+        catalog_tree.root.remove_children()
         kernels = {id(tab.kernel): tab.kernel for tab in self.tabs if tab.kernel is not None}
         kernels[id(self.kernel)] = self.kernel
         for kernel in kernels.values():
             self._configure_databricks_kernel(kernel)
+        if compute == "serverless":
+            execution_status = "Spark operations use remote serverless compute."
+        elif compute:
+            execution_status = f"Spark operations use remote cluster {compute}."
+        else:
+            execution_status = (
+                "Python cells include `workspace` and `dbutils`; Spark remains local."
+            )
         self.notify(
-            f"{connection.user_name} · {connection.host}\n"
-            "Python cells now include `workspace` and `dbutils`.",
+            f"{connection.user_name} · {connection.host}\n{execution_status}",
             title="Databricks connected",
             timeout=12,
         )
@@ -3207,7 +4038,12 @@ class NotebookApp(App[None]):
             return
         profile = connection.profile or connection.auth_type or "default authentication"
         self.notify(
-            f"{connection.user_name} · {connection.host}\nProfile: {profile}",
+            f"{connection.user_name} · {connection.host}\nProfile: {profile}\n"
+            + (
+                f"Remote Spark: {connection.compute}"
+                if connection.compute
+                else "Spark: local"
+            ),
             title="Databricks connected",
         )
 
@@ -3260,6 +4096,11 @@ class NotebookApp(App[None]):
         if not self.tabs:
             self.notify("There is no open file to save")
             return True
+        if self._active_tab.transient:
+            self.notify(
+                "Databricks scratch notebooks live only for this session; copy cells to a file to save."
+            )
+            return True
         if self.parquet_preview is not None:
             self.notify("Parquet previews are read-only")
             return True
@@ -3277,7 +4118,7 @@ class NotebookApp(App[None]):
             return True
         if self.text_buffer is not None:
             if self._active_tab.read_only:
-                self.notify("Help is read-only")
+                self.notify("This tab is read-only")
                 return True
             if self.text_editor is not None:
                 self.text_buffer.text = self.text_editor.text

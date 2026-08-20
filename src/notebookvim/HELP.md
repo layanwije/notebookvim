@@ -51,6 +51,10 @@ not scan the filesystem for suggestions, so type or paste the desired path.
 | `Ctrl+E` | Focus the file explorer; press it again to hide the explorer |
 | `Ctrl+P` | Find a file in the current project |
 | `Ctrl+Tab` | Move between the explorer and active editor |
+
+Command mode remembers the last submitted command for the current session.
+Press `:` to recall it, `Enter` to run it again, or `Escape` to cancel and clear
+the visible command input.
 | `Shift+Tab` | Next open tab |
 | `Ctrl+Shift+Tab` | Previous open tab |
 | `Ctrl+W` | Close the active tab |
@@ -154,6 +158,9 @@ Press `Escape` in the terminal to return to the document. Opening the AI or
 inspection pane closes the terminal pane so the document remains usable.
 
 ## AI assistant
+
+Assistant responses render as Markdown so headings, lists, tables, and fenced
+code blocks remain readable in the conversation pane.
 
 NotebookVim can stream responses from an installed AI command-line tool. The
 supported providers are Ollama, OpenAI Codex, and Claude Code.
@@ -299,6 +306,8 @@ Authenticate with the Databricks CLI first, then connect the current session:
 
 ```text
 :databricks connect [PROFILE]
+:databricks connect [PROFILE] --serverless
+:databricks connect [PROFILE] --cluster CLUSTER_ID
 :databricks status
 :databricks sync set LOCAL REMOTE
 :databricks sync status
@@ -316,6 +325,81 @@ Authenticate with the Databricks CLI first, then connect the current session:
 
 Remote mappings are stored under `.notebookvim/` in the project. Credentials remain
 in the Databricks configuration or system credential store.
+
+The compute options expose a Databricks Connect `spark` session. Python runs in
+the local kernel; Spark DataFrame and SQL work runs on the selected remote compute.
+
+Open the unified Databricks explorer with:
+
+```text
+:databricks explorer
+:databricks explorer open
+:databricks explorer close
+:explorer databricks open
+:explorer databricks close
+:explorer file open
+:explorer file close
+:databricks catalog
+:databricks notebook [catalog.schema.table]
+:databricks workspace
+:databricks compute
+:databricks workflows
+:tables catalog.schema
+:describe catalog.schema.table
+:sample catalog.schema.table [LIMIT]
+```
+
+It contains Workspace Items, Catalogs, Compute, and Workflows. Compute includes
+clusters and SQL warehouses; Workflows includes jobs, runs, and pipelines. The tree uses `j`/`k`, `h`/`l`,
+`Enter`, `/` fuzzy search, and `r` refresh.
+Press `Enter` on Serverless or a cluster to select it for Databricks Connect.
+Use `:databricks notebook` for an editable, session-only scratch notebook. It
+inherits the selected compute, defaults to Serverless, and can prefill
+`spark.table(...)`. Press `o` on a catalog table to open that scratch notebook
+directly. Scratch notebooks are never written to disk.
+Select a Workspace file or notebook with `Enter` to open its Databricks source
+in a read-only, language-aware editor tab.
+The sidebar stacks available explorers as compact vertical drawers and marks
+the active one. Use `Ctrl+E` from the sidebar to switch between Files and
+Databricks, and `Ctrl+Tab` to move between it and the editor.
+Resize it with `Ctrl+Right`/`Ctrl+Left`, or `:explorer wider`,
+`:explorer narrower`, and `:explorer reset`.
+
+Open and save a bundle's root `databricks.yml`, then resolve its included YAML
+files and visualize job task dependencies and resources locally:
+
+```text
+:databricks bundle visualize
+:databricks bundle visualize --target prod
+```
+
+This view does not require a Databricks connection.
+
+## Execution visualization
+
+Open and save a Python file, then render its downward static call tree without
+executing the source:
+
+```text
+:execution python visualize
+:execution python main
+:execution python entry
+:databricks execution python main
+:execution spark evaluate
+:execution spark visualize
+```
+
+The report follows calls from module-level code, shows source lines and
+recursion, and identifies external, dynamic, and unreached functions.
+Use `main` or `entry` to search the whole project for packaging entry points,
+`__main__.py`, main guards, and conventional `main()` or `cli()` functions.
+For Databricks bundles, root job tasks and their Python sources take precedence;
+the Python file itself remains a valid entry when it has no `main()` function.
+The Databricks-specific command filters the report to only the root Python tasks
+that can be called first by bundle orchestration.
+The Spark commands statically classify PySpark operations, actions, and likely
+shuffle boundaries without starting Spark. `visualize` adds an estimated
+downward stage flow above the evaluation table.
 
 ## Git
 

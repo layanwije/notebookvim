@@ -79,6 +79,7 @@ class RemoteReport:
     columns: list[str]
     rows: list[list[str]]
     details: list[str] = field(default_factory=list)
+    leading_details: list[str] = field(default_factory=list)
 
 
 class DatabricksRemote:

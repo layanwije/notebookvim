@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
+from rich.markdown import Markdown
 from rich.text import Text
 from textual import work
 from textual.app import ComposeResult
@@ -71,6 +72,16 @@ class AIPane(Vertical):
         if clean:
             self.query_one("#ai-output", RichLog).write(Text(clean, style=style))
 
+    def _write_markdown(self, value: str) -> None:
+        clean = safe_text(value).strip()
+        if clean:
+            self.query_one("#ai-output", RichLog).write(
+                Markdown(
+                    clean,
+                    code_theme=getattr(self.app, "syntax_theme", "ansi_dark"),
+                )
+            )
+
     def set_provider(self, name: str, model: Optional[str] = None) -> None:
         self.cancel()
         self.provider_name = name
@@ -96,15 +107,26 @@ class AIPane(Vertical):
         self._write(f"You: {prompt}", "bold")
         context = self.app.ai_context()  # type: ignore[attr-defined]
         request = f"{context}\n\nUser request:\n{prompt}" if context else prompt
+        response_parts: list[str] = []
+        response_rendered = False
         try:
             async for event in self.provider.run(request, self.workspace_root):
                 if event.kind == "error":
                     self._write(event.text, "bold red")
                 elif event.kind == "completed":
+                    if response_parts:
+                        self._write("AI:", "bold cyan")
+                        self._write_markdown("\n".join(response_parts))
+                        response_rendered = True
                     self._write(event.text, "dim green")
                 else:
-                    self._write(event.text)
+                    text = event.text.strip("\r\n")
+                    if text and (not response_parts or text != response_parts[-1]):
+                        response_parts.append(text)
         finally:
+            if response_parts and not response_rendered:
+                self._write("AI:", "bold cyan")
+                self._write_markdown("\n".join(response_parts))
             ai_input.disabled = False
             ai_input.focus()
 

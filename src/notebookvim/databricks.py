@@ -12,10 +12,13 @@ class DatabricksConnection:
     host: str
     user_name: str
     auth_type: Optional[str] = None
+    compute: Optional[str] = None
     client: Any = field(default=None, repr=False, compare=False)
 
 
-def connect_databricks(target: Optional[str] = None) -> DatabricksConnection:
+def connect_databricks(
+    target: Optional[str] = None, compute: Optional[str] = None
+) -> DatabricksConnection:
     """Connect with Databricks unified authentication and verify the identity."""
     try:
         from databricks.sdk import WorkspaceClient
@@ -39,6 +42,7 @@ def connect_databricks(target: Optional[str] = None) -> DatabricksConnection:
         host=client.config.host or "unknown workspace",
         user_name=current_user.user_name or current_user.display_name or "unknown user",
         auth_type=auth_type,
+        compute=compute,
         client=client,
     )
 
@@ -57,17 +61,48 @@ def databricks_client(connection: DatabricksConnection):
 
 
 def databricks_kernel_code(
-    profile: Optional[str], host: Optional[str] = None, auth_type: Optional[str] = None
+    profile: Optional[str],
+    host: Optional[str] = None,
+    auth_type: Optional[str] = None,
+    compute: Optional[str] = None,
 ) -> str:
-    """Return silent initialization code that exposes workspace and dbutils."""
+    """Return silent initialization code for workspace APIs and remote Spark."""
     if profile:
         constructor = f"WorkspaceClient(profile={profile!r})"
     elif host and auth_type:
         constructor = f"WorkspaceClient(host={host!r}, auth_type={auth_type!r})"
     else:
         constructor = "WorkspaceClient()"
-    return (
+    code = (
         "from databricks.sdk import WorkspaceClient\n"
         f"workspace = {constructor}\n"
         "dbutils = workspace.dbutils"
+    )
+    if compute is None:
+        return code
+
+    if profile:
+        spark_builder = f"DatabricksSession.builder.profile({profile!r})"
+    elif host and auth_type:
+        spark_builder = (
+            "DatabricksSession.builder.sdkConfig("
+            f"Config(host={host!r}, auth_type={auth_type!r}))"
+        )
+    else:
+        spark_builder = "DatabricksSession.builder"
+    if compute == "serverless":
+        spark_builder += ".serverless()"
+    else:
+        spark_builder += f".clusterId({compute!r})"
+    return (
+        code
+        + "\ntry:\n"
+        + "    from databricks.connect import DatabricksSession\n"
+        + "except ImportError as exc:\n"
+        + "    raise RuntimeError(\n"
+        + "        'Databricks Connect is not installed. Install a databricks-connect '\n"
+        + "        'version matching the target Databricks Runtime.'\n"
+        + "    ) from exc\n"
+        + "from databricks.sdk.core import Config\n"
+        + f"spark = {spark_builder}.getOrCreate()"
     )

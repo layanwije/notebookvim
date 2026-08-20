@@ -96,7 +96,17 @@ COMMANDS = (
     "theme snowflake-light",
     "theme snowflake-dark",
     "databricks connect",
+    "databricks connect --serverless",
+    "databricks connect --cluster",
     "databricks status",
+    "databricks bundle visualize",
+    "databricks bundle visualize --target",
+    "execution python visualize",
+    "execution python main",
+    "execution python entry",
+    "databricks execution python main",
+    "execution spark evaluate",
+    "execution spark visualize",
     "databricks sync set",
     "databricks sync status",
     "databricks sync diff",
@@ -111,6 +121,24 @@ COMMANDS = (
     "databricks logs follow",
     "databricks cancel",
     "databricks rerun",
+    "databricks catalog",
+    "databricks explorer",
+    "databricks explorer open",
+    "databricks explorer close",
+    "databricks notebook",
+    "databricks workspace",
+    "databricks compute",
+    "databricks workflows",
+    "explorer wider",
+    "explorer narrower",
+    "explorer reset",
+    "explorer databricks open",
+    "explorer databricks close",
+    "explorer file open",
+    "explorer file close",
+    "tables",
+    "describe",
+    "sample",
     "git profile add",
     "git profile list",
     "git profile use",
@@ -163,6 +191,12 @@ def normalize_command(value: str) -> str:
     if profile_connect:
         profile = profile_connect.group(1)
         return "databricks connect" + (f" {profile}" if profile else "")
+    scratch_notebook = re.fullmatch(
+        r"databricks notebook(?: (.+))?", original, re.IGNORECASE
+    )
+    if scratch_notebook:
+        table = scratch_notebook.group(1)
+        return "databricks notebook" + (f" {table}" if table else "")
     git_arguments = re.fullmatch(
         r"git (profile (?:add|use)|login)(?: (.+))?", original, re.IGNORECASE
     )
@@ -179,6 +213,13 @@ def normalize_command(value: str) -> str:
         operation = remote_arguments.group(1).lower()
         arguments = remote_arguments.group(2)
         return f"databricks {operation}" + (f" {arguments}" if arguments else "")
+    catalog_arguments = re.fullmatch(
+        r"(tables|describe|sample)(?: (.+))?", original, re.IGNORECASE
+    )
+    if catalog_arguments:
+        operation = catalog_arguments.group(1).lower()
+        arguments = catalog_arguments.group(2)
+        return operation + (f" {arguments}" if arguments else "")
     ai_prompt = re.fullmatch(r"ai ask(?: (.+))?", original, re.IGNORECASE)
     if ai_prompt:
         prompt = ai_prompt.group(1)

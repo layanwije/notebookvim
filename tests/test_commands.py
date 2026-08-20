@@ -19,6 +19,15 @@ def test_command_aliases_are_normalized():
     assert normalize_command(":project open Data Lake") == "project open Data Lake"
     assert normalize_command(":folder open Data Lake") == "folder open Data Lake"
     assert normalize_command(":databricks connect MyProfile") == "databricks connect MyProfile"
+    assert normalize_command(":databricks notebook Main.Analytics.Customers") == (
+        "databricks notebook Main.Analytics.Customers"
+    )
+    assert normalize_command(":describe Main.Analytics.Customers") == (
+        "describe Main.Analytics.Customers"
+    )
+    assert normalize_command(":sample Main.Analytics.Customers 10") == (
+        "sample Main.Analytics.Customers 10"
+    )
     assert normalize_command(":git profile use Work") == "git profile use Work"
     assert normalize_command(
         ':git profile add Work github octocat octo@example.com "Octo Cat"'
@@ -45,6 +54,18 @@ def test_completion_catalog_contains_full_commands_and_aliases():
     assert "ai interrupt" in COMMAND_SUGGESTIONS
     assert "databricks connect" in COMMAND_SUGGESTIONS
     assert "databricks status" in COMMAND_SUGGESTIONS
+    assert "databricks catalog" in COMMAND_SUGGESTIONS
+    assert "databricks explorer" in COMMAND_SUGGESTIONS
+    assert "databricks notebook" in COMMAND_SUGGESTIONS
+    assert "databricks workspace" in COMMAND_SUGGESTIONS
+    assert "databricks compute" in COMMAND_SUGGESTIONS
+    assert "databricks workflows" in COMMAND_SUGGESTIONS
+    assert "explorer wider" in COMMAND_SUGGESTIONS
+    assert "explorer narrower" in COMMAND_SUGGESTIONS
+    assert "explorer reset" in COMMAND_SUGGESTIONS
+    assert "tables" in COMMAND_SUGGESTIONS
+    assert "describe" in COMMAND_SUGGESTIONS
+    assert "sample" in COMMAND_SUGGESTIONS
     assert "git profile add" in COMMAND_SUGGESTIONS
     assert "git status" in COMMAND_SUGGESTIONS
     assert "git push" in COMMAND_SUGGESTIONS

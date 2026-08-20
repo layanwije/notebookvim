@@ -2,17 +2,20 @@ import asyncio
 from pathlib import Path
 
 import pytest
+from rich.markdown import Markdown
 
 from notebookvim.workspace import ParquetPreview
 from notebookvim.kernel import ExecutionUpdate
 from notebookvim.databricks import DatabricksConnection
+from notebookvim.catalog import CatalogItem
 from notebookvim.model import Cell, CellType, ExecutionState, Notebook, StreamOutput
 from notebookvim.preferences import load_theme, save_theme
-from notebookvim.remote import RemoteMapping, SyncStatus
+from notebookvim.remote import RemoteMapping, RemoteReport, SyncStatus
 from notebookvim.storage import load_notebook, new_notebook, save_notebook
 from notebookvim.terminal import TerminalInput, TerminalPane
 from notebookvim.themes import RICH_SYNTAX_THEMES
 from notebookvim.ai_pane import AIPane
+from notebookvim.ai import AIEvent
 from notebookvim.tui import EmptyWorkspace, InspectionModal, NotebookApp, TabBar
 
 
@@ -61,6 +64,43 @@ async def test_ai_pane_can_open_below_and_return_to_default_side(tmp_path, monke
         await app._dispatch_command("ai open side")
         assert document.has_class("ai-side")
         assert not document.has_class("ai-below")
+
+
+@pytest.mark.asyncio
+async def test_ai_pane_buffers_stream_and_renders_response_as_markdown(tmp_path):
+    notebook = Notebook(
+        path=tmp_path / "example.ipynb",
+        cells=[Cell(CellType.CODE, "answer = 42", cell_id="cell0001")],
+    )
+    app = NotebookApp(notebook, workspace_root=tmp_path)
+
+    class MarkdownProvider:
+        name = "Test"
+        available = True
+        process = None
+
+        async def run(self, prompt, workspace):
+            yield AIEvent("message", "# Result")
+            yield AIEvent("message", "```python")
+            yield AIEvent("message", "print(42)")
+            yield AIEvent("message", "```")
+            yield AIEvent("completed", "Done")
+
+        def cancel(self):
+            return False
+
+    async with app.run_test(size=(110, 34)):
+        pane = app.query_one("#ai-pane", AIPane)
+        pane.provider = MarkdownProvider()
+        output = pane.query_one("#ai-output")
+        writes = []
+        output.write = writes.append
+
+        pane.ask("Explain")
+        await app.workers.wait_for_complete()
+
+        markdown = [item for item in writes if isinstance(item, Markdown)]
+        assert len(markdown) == 1
 
 
 @pytest.mark.asyncio
@@ -456,7 +496,7 @@ async def test_workspace_fuzzy_finder_opens_another_notebook(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_workspace_tree_uses_neovim_navigation_toggle(tmp_path):
+async def test_workspace_tree_uses_neovim_navigation_and_explorer_switch(tmp_path):
     notebook_path = tmp_path / "notes.ipynb"
     save_notebook(new_notebook(notebook_path))
     app = NotebookApp(new_notebook(notebook_path), workspace_root=tmp_path)
@@ -464,13 +504,20 @@ async def test_workspace_tree_uses_neovim_navigation_toggle(tmp_path):
     async with app.run_test(size=(100, 30)) as pilot:
         tree = app.query_one("#files")
         assert tree.display and not tree.has_focus
+        assert str(app.query_one("#sidebar-switcher").render()) == "● FILES"
 
         await pilot.press("ctrl+e", "j")
         assert tree.has_focus
         assert tree.cursor_line > 0
 
         await pilot.press("ctrl+e")
-        assert not tree.display
+        assert tree.display and tree.has_focus
+        assert "● FILES" in str(app.query_one("#sidebar-switcher").render())
+
+        await pilot.press("ctrl+right")
+        assert app.explorer_width == 40
+        await app._dispatch_command("explorer reset")
+        assert app.explorer_width == 32
 
 
 @pytest.mark.asyncio
@@ -1056,6 +1103,43 @@ async def test_escape_then_colon_opens_commands_from_notebook_cell_normal_mode()
 
 
 @pytest.mark.asyncio
+async def test_command_mode_recalls_last_command_and_enter_reruns_it():
+    notebook = Notebook(
+        path=Path("example.ipynb"),
+        cells=[Cell(CellType.CODE, "value = 1", cell_id="cell0001")],
+    )
+    app = NotebookApp(notebook)
+    executed = []
+
+    async def capture(command):
+        executed.append(command)
+
+    app._dispatch_command = capture
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.press("colon")
+        command = app.query_one("#command")
+        command.value = "execution spark visualize"
+        await pilot.press("enter")
+        assert executed == ["execution spark visualize"]
+
+        await pilot.press("escape", "colon")
+        assert command.display
+        assert command.value == "execution spark visualize"
+        assert command.cursor_position == len(command.value)
+
+        await pilot.press("escape")
+        assert not command.display
+        assert command.value == ""
+
+        await pilot.press("colon", "enter")
+        assert executed == [
+            "execution spark visualize",
+            "execution spark visualize",
+        ]
+
+
+@pytest.mark.asyncio
 async def test_tab_close_requires_confirmation_for_unsaved_changes(tmp_path):
     notebook_path = tmp_path / "notes.ipynb"
     text_path = tmp_path / "draft.py"
@@ -1317,7 +1401,7 @@ async def test_databricks_connect_configures_notebook_kernel(tmp_path, monkeypat
         host="https://example.cloud.databricks.com",
         user_name="user@example.com",
     )
-    monkeypatch.setattr("notebookvim.tui.connect_databricks", lambda profile: connection)
+    monkeypatch.setattr("notebookvim.tui.connect_databricks", lambda profile, compute: connection)
 
     async with app.run_test(size=(110, 34)) as pilot:
         await submit_command(app, pilot, "databricks connect MyProfile")
@@ -1326,6 +1410,197 @@ async def test_databricks_connect_configures_notebook_kernel(tmp_path, monkeypat
         assert app.kernel.initialization_code is not None
         assert "WorkspaceClient(profile='MyProfile')" in app.kernel.initialization_code
         assert "dbutils = workspace.dbutils" in app.kernel.initialization_code
+
+
+@pytest.mark.asyncio
+async def test_databricks_connect_configures_remote_serverless_spark(
+    tmp_path, monkeypatch
+):
+    notebook_path = tmp_path / "notes.ipynb"
+    save_notebook(new_notebook(notebook_path))
+    app = NotebookApp(new_notebook(notebook_path), workspace_root=tmp_path)
+    connection = DatabricksConnection(
+        profile="MyProfile",
+        host="https://example.cloud.databricks.com",
+        user_name="user@example.com",
+        compute="serverless",
+    )
+    monkeypatch.setattr(
+        "notebookvim.tui.connect_databricks", lambda profile, compute: connection
+    )
+
+    async with app.run_test(size=(110, 34)) as pilot:
+        await submit_command(app, pilot, "databricks connect MyProfile --serverless")
+
+        assert app.databricks_connection.compute == "serverless"
+        assert (
+            ".profile('MyProfile').serverless().getOrCreate()"
+            in app.kernel.initialization_code
+        )
+
+
+@pytest.mark.asyncio
+async def test_catalog_command_opens_lazy_catalog_tree(tmp_path):
+    notebook_path = tmp_path / "notes.ipynb"
+    save_notebook(new_notebook(notebook_path))
+    app = NotebookApp(new_notebook(notebook_path), workspace_root=tmp_path)
+
+    class FakeCatalog:
+        def catalogs(self):
+            return [CatalogItem("catalog", "main", "main")]
+
+        def schemas(self, catalog):
+            return [CatalogItem("schema", "analytics", f"{catalog}.analytics")]
+
+        def describe(self, table_name):
+            return RemoteReport(
+                f"Table · {table_name}", ["column", "type"], [["id", "BIGINT"]]
+            )
+
+    app.catalog_service = FakeCatalog()
+    app.databricks_connection = DatabricksConnection(
+        profile="Test", host="https://example.cloud.databricks.com", user_name="user"
+    )
+
+    async with app.run_test(size=(110, 34)) as pilot:
+        await submit_command(app, pilot, "databricks catalog")
+
+        tree = app.query_one("#catalog-tree")
+        assert tree.display
+        assert not app.query_one("#files").display
+
+        await app._describe_catalog_table("main.analytics.customers")
+        assert app.remote_report.title == "Table · main.analytics.customers"
+        assert "● DATABRICKS" in str(app.query_one("#sidebar-switcher").render())
+        catalogs_root = next(
+            node for node in tree.root.children if node.data.kind == "catalogs_root"
+        )
+        catalog_node = catalogs_root.children[0]
+        await app._load_catalog_node(catalog_node)
+        assert catalog_node.children[0].data.full_name == "main.analytics"
+
+        await pilot.press("ctrl+e", "ctrl+e")
+        assert app.query_one("#files").display
+        assert not tree.display
+        assert "● FILES" in str(app.query_one("#sidebar-switcher").render())
+
+        await pilot.press("ctrl+e")
+        assert tree.display
+        assert not app.query_one("#files").display
+
+
+@pytest.mark.asyncio
+async def test_databricks_explorer_has_developer_resource_roots(tmp_path):
+    notebook_path = tmp_path / "notes.ipynb"
+    save_notebook(new_notebook(notebook_path))
+    app = NotebookApp(new_notebook(notebook_path), workspace_root=tmp_path)
+
+    class FakeExplorer:
+        pass
+
+    app.catalog_service = FakeExplorer()
+    app.databricks_connection = DatabricksConnection(
+        profile="Test", host="https://example.cloud.databricks.com", user_name="user"
+    )
+
+    async with app.run_test(size=(110, 34)) as pilot:
+        await submit_command(app, pilot, "databricks explorer")
+
+        tree = app.query_one("#catalog-tree")
+        assert [node.label.plain for node in tree.root.children] == [
+            "Workspace Items", "Catalogs", "Compute", "Workflows"
+        ]
+        compute = next(
+            node for node in tree.root.children if node.data.kind == "compute_root"
+        )
+        workflows = next(
+            node for node in tree.root.children if node.data.kind == "workflows_root"
+        )
+        await app._load_catalog_node(compute)
+        await app._load_catalog_node(workflows)
+        assert [node.label.plain for node in compute.children] == [
+            "Serverless", "Clusters", "SQL Warehouses"
+        ]
+        assert [node.label.plain for node in workflows.children] == [
+            "Jobs", "Pipelines"
+        ]
+
+
+@pytest.mark.asyncio
+async def test_databricks_compute_node_configures_remote_spark(tmp_path):
+    notebook_path = tmp_path / "notes.ipynb"
+    save_notebook(new_notebook(notebook_path))
+    app = NotebookApp(new_notebook(notebook_path), workspace_root=tmp_path)
+    app.databricks_connection = DatabricksConnection(
+        profile="Test", host="https://example.cloud.databricks.com", user_name="user"
+    )
+
+    async with app.run_test(size=(110, 34)):
+        app._select_databricks_compute(
+            CatalogItem("serverless", "Serverless", "serverless")
+        )
+
+        assert app.databricks_connection.compute == "serverless"
+        assert ".profile('Test').serverless().getOrCreate()" in (
+            app.kernel.initialization_code or ""
+        )
+
+
+@pytest.mark.asyncio
+async def test_databricks_scratch_notebook_is_transient_and_attached(tmp_path):
+    notebook_path = tmp_path / "notes.ipynb"
+    save_notebook(new_notebook(notebook_path))
+    app = NotebookApp(new_notebook(notebook_path), workspace_root=tmp_path)
+    app.databricks_connection = DatabricksConnection(
+        profile="Test", host="https://example.cloud.databricks.com", user_name="user"
+    )
+
+    async with app.run_test(size=(110, 34)):
+        await app._open_databricks_scratch("Main.Analytics.Customers")
+
+        tab = app._active_tab
+        assert tab.transient is True
+        assert tab.notebook is not None
+        assert tab.notebook.cells[0].source == (
+            'df = spark.table("Main.Analytics.Customers")\ndf'
+        )
+        assert app.databricks_connection.compute == "serverless"
+        assert tab.kernel is not None
+        assert ".profile('Test').serverless().getOrCreate()" in (
+            tab.kernel.initialization_code or ""
+        )
+        assert app._save() is True
+        assert not tab.path.exists()
+
+
+@pytest.mark.asyncio
+async def test_databricks_workspace_item_opens_in_read_only_tab(tmp_path):
+    notebook_path = tmp_path / "notes.ipynb"
+    save_notebook(new_notebook(notebook_path))
+    app = NotebookApp(new_notebook(notebook_path), workspace_root=tmp_path)
+
+    class FakeExplorer:
+        def export_workspace_item(self, item):
+            return b"SELECT * FROM main.analytics.customers\n"
+
+    app.catalog_service = FakeExplorer()
+    app.databricks_connection = DatabricksConnection(
+        profile="Test", host="https://example.cloud.databricks.com", user_name="user"
+    )
+    remote = CatalogItem(
+        "workspace_item",
+        "Customer query",
+        "/Shared/Customer query",
+        {"object type": "NOTEBOOK", "language": "SQL"},
+    )
+
+    async with app.run_test(size=(110, 34)):
+        await app._open_databricks_workspace_item(remote)
+
+        assert app._active_tab.read_only
+        assert app._active_path.suffix == ".sql"
+        assert app.text_buffer.text.startswith("SELECT")
+        assert not app.text_editor.editable
 
 
 @pytest.mark.asyncio
@@ -1361,3 +1636,176 @@ async def test_remote_sync_commands_create_status_report(tmp_path):
         assert [call[0] for call in calls] == ["configure", "push", "status"]
         assert app.remote_report is not None
         assert app.remote_report.title == "Remote status · synchronized"
+
+
+@pytest.mark.asyncio
+async def test_databricks_bundle_visualize_opens_local_graph_report(tmp_path):
+    notebook_path = tmp_path / "notes.ipynb"
+    save_notebook(new_notebook(notebook_path))
+    bundle_path = tmp_path / "databricks.yml"
+    bundle_path.write_text(
+        """bundle:
+  name: analytics
+resources:
+  jobs:
+    daily:
+      tasks:
+        - task_key: ingest
+          notebook_task:
+            notebook_path: ./ingest.py
+        - task_key: publish
+          depends_on:
+            - task_key: ingest
+          notebook_task:
+            notebook_path: ./publish.py
+""",
+        encoding="utf-8",
+    )
+    app = NotebookApp(load_notebook(notebook_path), workspace_root=tmp_path)
+
+    async with app.run_test(size=(120, 36)) as pilot:
+        await app._open_project_file(bundle_path)
+        await app._dispatch_command("databricks bundle visualize")
+        await pilot.pause()
+
+        assert app.remote_report is not None
+        assert app.remote_report.title == "Bundle · analytics"
+        assert ["daily", "publish", "notebook", "ingest", "./publish.py"] in app.remote_report.rows
+        assert app.remote_report.leading_details == [
+            "Execution order\n"
+            "daily\n"
+            "└── ingest  [notebook]\n"
+            "    └── publish  [notebook]"
+        ]
+
+
+@pytest.mark.asyncio
+async def test_explorer_open_and_close_commands_control_sidebar_visibility(tmp_path):
+    notebook_path = tmp_path / "notes.ipynb"
+    save_notebook(new_notebook(notebook_path))
+    app = NotebookApp(new_notebook(notebook_path), workspace_root=tmp_path)
+    app.catalog_service = type("FakeCatalog", (), {})()
+    app.databricks_connection = DatabricksConnection(
+        profile="Test", host="https://example.cloud.databricks.com", user_name="user"
+    )
+
+    async with app.run_test(size=(100, 30)):
+        switcher = app.query_one("#sidebar-switcher")
+        sidebar = app.query_one("#sidebar")
+        assert str(switcher.render()) == "● FILES"
+
+        await app._dispatch_command("explorer databricks open")
+        assert app.sidebar_mode == "catalog"
+        assert str(switcher.render()) == "○ FILES\n● DATABRICKS"
+
+        await app._dispatch_command("databricks explorer close")
+        assert app.sidebar_mode == "files"
+        assert str(switcher.render()) == "● FILES"
+
+        await app._dispatch_command("explorer file close")
+        assert not sidebar.display
+
+        await app._dispatch_command("explorer file open")
+        assert sidebar.display
+        assert str(switcher.render()) == "● FILES"
+
+
+@pytest.mark.asyncio
+async def test_python_execution_visualize_opens_static_tree_report(tmp_path):
+    notebook_path = tmp_path / "notes.ipynb"
+    save_notebook(new_notebook(notebook_path))
+    python_path = tmp_path / "pipeline.py"
+    python_path.write_text(
+        "def load():\n    print('loaded')\n\nload()\n", encoding="utf-8"
+    )
+    app = NotebookApp(new_notebook(notebook_path), workspace_root=tmp_path)
+
+    async with app.run_test(size=(110, 34)) as pilot:
+        await app._open_project_file(python_path)
+        await app._dispatch_command("execution python visualize")
+        await pilot.pause()
+
+        assert app.remote_report is not None
+        assert app.remote_report.title == "Python execution · pipeline.py"
+        assert ["load", "1", "1", "print"] in app.remote_report.rows
+        assert any("load()  L4" in detail for detail in app.remote_report.details)
+
+
+@pytest.mark.asyncio
+async def test_python_entry_command_searches_whole_project(tmp_path):
+    notebook_path = tmp_path / "notes.ipynb"
+    save_notebook(new_notebook(notebook_path))
+    (tmp_path / "app.py").write_text(
+        'def main():\n    pass\n\nif __name__ == "__main__":\n    main()\n',
+        encoding="utf-8",
+    )
+    app = NotebookApp(new_notebook(notebook_path), workspace_root=tmp_path)
+
+    async with app.run_test(size=(110, 34)) as pilot:
+        await app._dispatch_command("execution python entry")
+        await pilot.pause()
+
+        assert app.remote_report is not None
+        assert app.remote_report.title == "Python entry points"
+        assert any(row[1] == "app.py" and row[4] == "__name__ main guard" for row in app.remote_report.rows)
+
+
+@pytest.mark.asyncio
+async def test_databricks_python_main_shows_only_root_bundle_tasks(tmp_path):
+    notebook_path = tmp_path / "notes.ipynb"
+    save_notebook(new_notebook(notebook_path))
+    (tmp_path / "databricks.yml").write_text(
+        """bundle:
+  name: sample
+resources:
+  jobs:
+    workflow:
+      tasks:
+        - task_key: start
+          spark_python_task:
+            python_file: ./start.py
+        - task_key: finish
+          depends_on:
+            - task_key: start
+          spark_python_task:
+            python_file: ./finish.py
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "start.py").write_text("print('start')\n", encoding="utf-8")
+    (tmp_path / "finish.py").write_text("print('finish')\n", encoding="utf-8")
+    (tmp_path / "ordinary.py").write_text("def main():\n    pass\n", encoding="utf-8")
+    app = NotebookApp(new_notebook(notebook_path), workspace_root=tmp_path)
+
+    async with app.run_test(size=(110, 34)) as pilot:
+        await app._dispatch_command("databricks execution python main")
+        await pilot.pause()
+
+        assert app.remote_report is not None
+        assert app.remote_report.title == "Databricks Python entry points"
+        assert len(app.remote_report.rows) == 1
+        assert app.remote_report.rows[0][1] == "start.py"
+        assert app.remote_report.rows[0][4] == "Databricks root task `workflow.start`"
+
+
+@pytest.mark.asyncio
+async def test_spark_execution_visualize_opens_static_stage_report(tmp_path):
+    notebook_path = tmp_path / "notes.ipynb"
+    save_notebook(new_notebook(notebook_path))
+    spark_path = tmp_path / "transform.py"
+    spark_path.write_text(
+        'df = spark.table("sales").groupBy("region").agg({"amount": "sum"})\n'
+        'df.write.saveAsTable("summary")\n',
+        encoding="utf-8",
+    )
+    app = NotebookApp(new_notebook(notebook_path), workspace_root=tmp_path)
+
+    async with app.run_test(size=(120, 36)) as pilot:
+        await app._open_project_file(spark_path)
+        await app._dispatch_command("execution spark visualize")
+        await pilot.pause()
+
+        assert app.remote_report is not None
+        assert app.remote_report.title == "Spark evaluation · transform.py"
+        assert any(row[2] == "agg()" and row[4] == "definite" for row in app.remote_report.rows)
+        assert app.remote_report.leading_details[0].startswith("Estimated Spark execution\ntransform.py")
